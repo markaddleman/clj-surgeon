@@ -138,7 +138,7 @@
                      :find-subform :lens :xray :edit :change :change! :undo-change!
                      :replace-subform :replace-subform!
                      :cljc-merge :cljc-split :cljc-add-require :cljc-analyze
-                     :relation-census}]
+                     :relation-census :refs}]
       (is (= expected (set (keys core/ops-registry)))))))
 
 (deftest registry-entries-have-required-keys

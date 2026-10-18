@@ -4,6 +4,7 @@
    [babashka.fs :as fs]
    [clj-surgeon.core :as core]
    [clj-surgeon.outline :as outline]
+   [clj-surgeon.refs :as refs]
    [clojure.string :as str]
    [clojure.test :refer [deftest is testing]]
    [rewrite-clj.zip :as z]))
@@ -329,3 +330,159 @@
                 (str/includes? result "bad.clj"))))
       (finally
         (fs/delete-tree tmp-dir)))))
+
+;; ============================================================
+;; :refs -- pure
+;; ============================================================
+
+(deftest refs-parse-sym-splits-namespace-and-name
+  (is (= {:ns "my.ns" :name "my-fn"} (refs/parse-sym "my.ns/my-fn")))
+  (is (= {:ns "my.ns" :name "my-fn"} (refs/parse-sym "#'my.ns/my-fn")))
+  (is (= {:ns "a.b" :name "file->zloc"} (refs/parse-sym "a.b/file->zloc")))
+  (is (nil? (refs/parse-sym "my-fn")))
+  (is (nil? (refs/parse-sym "my.ns/")))
+  (is (nil? (refs/parse-sym nil))))
+
+(deftest refs-ns-of-source-reads-the-first-ns-form
+  (is (= "a.b" (refs/ns-of-source "(ns a.b (:require [x :as y]))\n(defn f [])")))
+  (is (= "a.b" (refs/ns-of-source ";; header\n(ns ^:foo a.b)\n")))
+  (is (nil? (refs/ns-of-source "(defn f [])"))))
+
+(def ^:private refs-analysis
+  {:var-definitions [{:ns 'app.lib :name 'target :filename "src/app/lib.clj" :row 2}]
+   :var-usages
+   [{:to 'app.lib :name 'target :filename "src/a.clj" :row 3 :col 1 :name-row 3 :name-col 2
+     :from 'a :from-var 'f :alias 'l :arity 1}
+    ;; a function passed as an argument: kondo reports a value and a synthetic call
+    {:to 'app.lib :name 'target :filename "src/a.clj" :row 6 :col 17 :name-row 6 :name-col 17
+     :from 'a :from-var 'g :alias 'l}
+    {:to 'app.lib :name 'target :filename "src/a.clj" :row 6 :col 17
+     :from 'a :from-var 'g :alias 'l :arity 1}
+    {:to 'app.lib :name 'target :filename "src/a.clj" :row 1 :col 36 :refer true :from 'a}
+    ;; .cljc: one entry for each language at the same position
+    {:to 'app.lib :name 'target :filename "src/c.cljc" :row 2 :col 5 :name-row 2 :name-col 6
+     :from 'c :from-var 'h :arity 1 :lang :clj}
+    {:to 'app.lib :name 'target :filename "src/c.cljc" :row 2 :col 5 :name-row 2 :name-col 6
+     :from 'c :from-var 'h :arity 1 :lang :cljs}
+    ;; other vars and other namespaces are not references
+    {:to 'app.lib :name 'other :filename "src/a.clj" :row 9 :col 1 :from 'a :arity 0}
+    {:to 'other.lib :name 'target :filename "src/a.clj" :row 9 :col 1 :from 'a :arity 0}]})
+
+(deftest refs-usages-become-one-ref-for-each-position
+  (let [rs (refs/usages->refs refs-analysis "app.lib" "target")]
+    (is (= [["src/a.clj" 1 :refer "(ns)"]
+            ["src/a.clj" 3 :alias-call "f"]
+            ["src/a.clj" 6 :value "g"]
+            ["src/c.cljc" 2 :call "h"]]
+           (map (juxt :file :line :kind :form) rs)))))
+
+(deftest refs-definition-is-found-in-the-analysis
+  (is (= {:file "src/app/lib.clj" :line 2} (refs/definition refs-analysis "app.lib" "target")))
+  (is (nil? (refs/definition refs-analysis "app.lib" "nope"))))
+
+(deftest refs-compact-format-has-one-line-per-ref-and-a-total
+  (let [rs [{:file "a.clj" :line 3 :ns "a" :form "f" :kind :call}]]
+    (is (= "a.clj:3 a/f call\n1 reference to x/y in 1 file; defined at x.clj:1"
+           (refs/format-compact rs {:sym "x/y" :definition {:file "x.clj" :line 1} :dir "/d"} nil)))
+    (is (= "0 references to x/y in 0 files; no definition found under /d"
+           (refs/format-compact [] {:sym "x/y" :dir "/d"} nil)))
+    (is (str/includes? (refs/format-compact rs {:sym "x/y" :dir "/d"} {["a.clj" 3] "(f 1)"})
+                       "\n    (f 1)\n"))))
+
+;; ============================================================
+;; :refs -- fixture project, real clj-kondo
+;; ============================================================
+
+(def ^:private refs-fixture-files
+  {"deps.edn" "{:paths [\"src\"]}\n"
+   "src/app/lib.clj"
+   (str "(ns app.lib)\n"
+        "(defn target [x] x)\n"
+        "(defn own-caller [] (target 1))\n"
+        "(defn shadow [target] (target 2))\n")
+   "src/app/user.clj"
+   (str "(ns app.user\n"
+        "  (:require [app.lib :as l :refer [target]]))\n"
+        "(defn a [] (l/target 1))\n"
+        "(defn b [] (app.lib/target 2))\n"
+        "(defn c [] (target 3))\n"
+        "(defn d [] (map l/target [1]))\n")
+   "src/app/x.cljc"
+   (str "(ns app.x (:require [app.lib :as lib]))\n"
+        "#?(:clj (defn f [] (lib/target 1)))\n"
+        "(defn g [] (lib/target 2))\n")
+   "src/app/unrelated.clj" "(ns app.unrelated)\n(defn target [x] x)\n(defn z [] (target 1))\n"
+   "test/app/lib_test.clj"
+   (str "(ns app.lib-test (:require [app.lib :as l]))\n"
+        "(defn t [] (l/target 1))\n")})
+
+(defn- refs-with-fixture [f]
+  (let [dir (fs/create-temp-dir {:prefix "refs-fixture"})]
+    (try
+      (doseq [[path text] refs-fixture-files]
+        (let [p (fs/path dir path)]
+          (fs/create-dirs (fs/parent p))
+          (spit (str p) text)))
+      (f (str dir))
+      (finally (fs/delete-tree dir)))))
+
+(defn- refs-edn [dir opts]
+  (core/run-refs (merge {:dir dir :format :edn} opts)))
+
+(deftest refs-fixture-covers-every-kind-and-skips-the-shadowing-local
+  (refs-with-fixture
+    (fn [dir]
+      (let [rs (refs-edn dir {:sym "app.lib/target"})
+            by (fn [file] (map (juxt :line :kind :form) (filter #(= file (:file %)) rs)))]
+        (testing "unqualified call in the own namespace; the shadowing local is not listed"
+          (is (= [[3 :call "own-caller"]] (by "src/app/lib.clj"))))
+        (testing "refer, alias call, qualified call, referred call, value use"
+          (is (= [[2 :refer "(ns)"] [3 :alias-call "a"] [4 :call "b"]
+                  [5 :call "c"] [6 :value "d"]]
+                 (by "src/app/user.clj"))))
+        (testing ".cljc is reported once for each position"
+          (is (= [[2 :alias-call "f"] [3 :alias-call "g"]] (by "src/app/x.cljc"))))
+        (testing "tests are searched by default"
+          (is (= [[2 :alias-call "t"]] (by "test/app/lib_test.clj"))))
+        (testing "a var of the same name in another namespace is not a reference"
+          (is (empty? (by "src/app/unrelated.clj"))))))))
+
+(deftest refs-fixture-include-tests-false-leaves-test-files-out
+  (refs-with-fixture
+    (fn [dir]
+      (let [rs (refs-edn dir {:sym "app.lib/target" :include-tests false})]
+        (is (seq rs))
+        (is (not-any? #(str/starts-with? (:file %) "test/") rs))))))
+
+(deftest refs-fixture-file-and-form-name-the-same-var-as-sym
+  (refs-with-fixture
+    (fn [dir]
+      (is (= (refs-edn dir {:sym "app.lib/target"})
+             (refs-edn dir {:file (str dir "/src/app/lib.clj") :form "target"}))))))
+
+(deftest refs-fixture-compact-output-and-context
+  (refs-with-fixture
+    (fn [dir]
+      (let [text (core/run-refs {:dir dir :sym "app.lib/target" :context true})]
+        (is (str/includes? text "src/app/user.clj:3 app.user/a alias-call\n    (defn a [] (l/target 1))\n"))
+        (is (str/includes? text "src/app/user.clj:2 app.user/(ns) refer"))
+        (is (str/ends-with? text "9 references to app.lib/target in 4 files; defined at src/app/lib.clj:2")))
+      (let [text (core/run-refs {:dir dir :sym "app.lib/target"})]
+        (is (not (str/includes? text "(defn a")))))))
+
+(deftest refs-refusals-are-typed
+  (refs-with-fixture
+    (fn [dir]
+      (is (= :refs-sym-not-qualified (:error-type (core/run-refs {:dir dir :sym "target"}))))
+      (is (= :refs-target-missing (:error-type (core/run-refs {:dir dir}))))
+      (is (= :refs-file-missing (:error-type (core/run-refs {:dir dir :file "/nope.clj" :form "f"}))))
+      (is (= :workspace-root-not-a-directory
+             (:error-type (core/run-refs {:dir (str dir "/missing") :sym "a.b/c"})))))))
+
+(deftest refs-is-a-registered-read-only-op
+  (let [entry (get core/ops-registry :refs)]
+    (is (= :read (:category entry)))
+    (is (seq (:desc entry)))
+    (is (seq (:examples entry)))
+    (is (contains? (:args entry) :sym))
+    (is (str/includes? (core/format-op-help :refs entry) ":sym"))))

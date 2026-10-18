@@ -27,6 +27,7 @@
    [clj-surgeon.outline :as outline]
    [clj-surgeon.parse-admission :as admission]
    [clj-surgeon.receipt-artifacts :as artifacts]
+   [clj-surgeon.refs :as refs]
    [clj-surgeon.relation-census :as relation-census]
    [clj-surgeon.rename :as rename]
    [clj-surgeon.cat-symbol :as cat-symbol]
@@ -2073,6 +2074,76 @@
         (let [files (vec (mapcat :files (discover-projects root)))]
           (cat-symbol/show opts files))))))
 
+(defn- truthy-flag?
+  "A boolean option as the CLI gives it: a boolean, or the string \"true\"."
+  [v default]
+  (cond (nil? v) default
+        (string? v) (not= "false" v)
+        :else (boolean v)))
+
+(defn- refs-target
+  "Resolve the `:sym` or `:file` plus `:form` of `:refs` to `{:ns :name}`,
+   or a typed refusal map."
+  [{:keys [sym file form]}]
+  (cond
+    sym (or (refs/parse-sym sym)
+            {:error (str ":refs :sym must be a qualified symbol like my.ns/my-fn: " (pr-str sym))
+             :error-type :refs-sym-not-qualified
+             :next-action "pass_a_qualified_symbol_or_file_and_form"})
+    (and file form)
+    (if-not (fs/regular-file? (str file))
+      {:error (str ":refs :file must be an existing file: " (pr-str (str file)))
+       :error-type :refs-file-missing
+       :next-action "pass_an_existing_file"}
+      (if-let [ns-name (refs/ns-of-source (slurp (str file)))]
+        {:ns ns-name :name (str form)}
+        {:error (str "No ns form found in " file)
+         :error-type :refs-file-has-no-ns
+         :next-action "pass_a_qualified_symbol"}))
+    :else {:error ":refs needs :sym, or :file plus :form"
+           :error-type :refs-target-missing
+           :next-action "pass_a_qualified_symbol_or_file_and_form"}))
+
+(defn- refs-test-path?
+  "True when the file lies under a `test` or `tests` directory of its project."
+  [root file]
+  (contains? #{"test" "tests"}
+             (first (str/split (str (fs/relativize root file)) #"/"))))
+
+(defn- refs-source-files
+  "Absolute .clj/.cljs/.cljc paths to search: the source paths of every build
+   file under `dir`, plus the `test` and `tests` directories next to each build
+   file when `include-tests` is true. With `include-tests` false, any file in a
+   `test` or `tests` directory of its project is dropped."
+  [dir include-tests]
+  (->> (discover-projects dir)
+       (mapcat (fn [{:keys [root files]}]
+                 (let [extra (when include-tests
+                               (mapcat #(find-clj-files (fs/path root %)) ["test" "tests"]))
+                       all (concat files extra)]
+                   (cond->> all
+                     (not include-tests) (remove #(refs-test-path? root %))))))
+       (map #(str (fs/absolutize %)))
+       distinct
+       sort
+       vec))
+
+(defn run-refs
+  "Cross-file references of one var, resolved by the clj-kondo analysis.
+   See the registry entry for the arguments."
+  [{:keys [dir include-tests context] output-format :format :as opts}]
+  (let [dir (try (str (fs/absolutize (or dir "."))) (catch Exception _e (str dir)))
+        target (refs-target opts)]
+    (cond
+      (:error target) target
+      (ls-tree-root-refusal dir) (ls-tree-root-refusal dir)
+      :else
+      (refs/find-refs {:dir dir
+                       :format (if (= :edn output-format) :edn :compact)
+                       :context (truthy-flag? context false)}
+                      target
+                      (refs-source-files dir (truthy-flag? include-tests true))))))
+
 ;; ============================================================
 ;; Ops registry — single source of truth for dispatch + help
 ;; ============================================================
@@ -2534,6 +2605,27 @@
                                    :format {:desc ":edn for machine-readable (default: text)"}}
                        :examples  ["clj-surgeon :op :ls-tree :dir ."
                                    "clj-surgeon :op :ls-tree :dir ~/src.local/ :grep \"postgres|jdbc\""]
+                       :category  :read}
+
+    :refs             {:handler   run-refs
+                       :desc      "Cross-file references of one var (call, value, refer, alias-call)"
+                       :args      {:sym           {:desc "Qualified symbol my.ns/my-fn (or use :file plus :form)"}
+                                   :file          {:desc "Source file that defines the var (with :form)"}
+                                   :form          {:desc "Unqualified name of the var defined in :file"}
+                                   :dir           {:desc "Root to search (default \".\"); source paths come from deps.edn, bb.edn or project.clj"}
+                                   :include-tests {:desc "false to skip files under test/ or tests/ (default true)"}
+                                   :format        {:desc ":edn for a vector of {:file :line :col :ns :form :kind} (default: compact)"}
+                                   :context       {:desc "true to add the trimmed source line under each reference"}}
+                       :workflow  ["Compact output is one line per reference: <file>:<line> <ns>/<top-level form> <kind>, then a total line."
+                                   "Kinds: call (qualified or own-namespace call), alias-call (call through an :as alias), value (passed or referenced without a call, e.g. #'ns/f or (map f xs)), refer (the name inside an ns :refer)."
+                                   "The analysis is clj-kondo's, so aliases, :refer, :rename and a local binding that shadows the var are resolved per file. A shadowed use is not a reference."
+                                   "Covers .clj, .cljs and .cljc; a .cljc position is reported once. Only files that contain the var name are analysed, which keeps a 700-namespace tree to a few seconds."
+                                   "Test code is searched too: a test/ or tests/ directory next to each build file is added to the source paths. Use :include-tests false to leave it out."
+                                   "A symbol in a quote, a string or a macro that builds the name is not a var usage and is not listed. Needs clj-kondo on the PATH."]
+                       :examples  ["clj-surgeon :op :refs :sym my.ns/my-fn"
+                                   "clj-surgeon :op :refs :file src/my/ns.clj :form my-fn :dir ."
+                                   "clj-surgeon :op :refs :sym my.ns/my-fn :include-tests false :context true"
+                                   "clj-surgeon :op :refs :sym my.ns/my-fn :format :edn"]
                        :category  :read}
 
     :mv               {:handler run-mv
