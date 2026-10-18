@@ -29,7 +29,7 @@
 
 (deftest tool-profiles-preserve-full-default-and-isolate-the-editor
   (is (= ["inspect_clojure" "apply_clojure_changes" "edit_clojure"
-          "transform_clojure" "relation_census" "alias_migration"
+          "transform_clojure" "relation_census" "query_clojure" "alias_migration"
           "helper_extraction" "namespace_split" "insert_forms" "rename_alias" "admit_clojure_patch" "feature_thread" "require_change"]
          (mapv :name (tool/tools-for-profile :full))))
   (is (= ["edit_clojure"]
@@ -43,9 +43,9 @@
 ;; @spec MCP-OP-HELPER-001
 (deftest exposes-exactly-eleven-typed-tools
   (let [tools (server/make-tools nil ".")]
-    (is (= 13 (count tools)))
+    (is (= 14 (count tools)))
     (is (= ["inspect_clojure" "apply_clojure_changes" "edit_clojure"
-            "transform_clojure" "relation_census" "alias_migration"
+            "transform_clojure" "relation_census" "query_clojure" "alias_migration"
             "helper_extraction" "namespace_split" "insert_forms" "rename_alias" "admit_clojure_patch" "feature_thread" "require_change"]
            (mapv :name tools)))
     (doseq [{:keys [output-schema]} tools]

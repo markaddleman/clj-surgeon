@@ -23,6 +23,7 @@
    [clj-surgeon.mcp-paths :as mcp-paths]
    [clj-surgeon.mcp-prepared-confirmation :as prepared-confirmation]
    [clj-surgeon.mcp-program-tool :as program-tool]
+   [clj-surgeon.mcp-query-clojure :as query-clojure]
    [clj-surgeon.mcp-relation-census :as census-tool]
    [clj-surgeon.mcp-rename-alias :as rename-alias]
    [clj-surgeon.mcp-require-change :as require-change]
@@ -206,6 +207,7 @@
     (inspect-tool/init! configured)
     (program-tool/init! configured)
     (census-tool/init! configured)
+    (query-clojure/init! configured)
     (admit-tool/init! configured)
     (feature-thread/init! configured)))
 
@@ -2557,6 +2559,7 @@
            edit-clojure-tool
            program-tool/transform-clojure-tool
            census-tool/relation-census-tool
+           query-clojure/query-clojure-tool
            alias-migration-tool
            (helper-extraction/tool)
            namespace-split/tool

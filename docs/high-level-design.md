@@ -1303,6 +1303,135 @@ require bounded, confined discovery and typed refusals carrying either a
 computed continuation or a usable remedy, so an incomplete tree walk cannot
 masquerade as a complete census.
 
+## Code index: answer read questions from fresh var facets
+
+Status: HLD for slice A of issue #3 (markaddleman/clj-surgeon). The
+[design](intent/code-index/code-index-design.md) and the 90-row
+[specification](intent/code-index/code-index-specs.md) (MCP-OP-QUERY-001
+through MCP-OP-QUERY-090) are drafts. Nothing is implemented.
+
+### Problem
+
+Agents spend most of their Clojure reading budget on orientation: they read a
+whole namespace, or large line ranges of it, before they work in it. Measured
+on 912 Claude Code transcripts of pyze/modernization-mcp (issue #3):
+
+- In the median code-work session, 33% of the cost goes to tool results that
+  read or search Clojure source. Almost all of it is shell `sed`, `cat` and
+  `head`, not the Read tool.
+- In a hand check of reads, 74% of the characters were orientation reads of a
+  whole module. 16% were searches for a definition or a use. 11% were bodies
+  that the agent then edited.
+- A result is expensive because it stays in context: each later call reads it
+  again, and cache writes are 49% of all cost.
+
+The existing read surfaces (`inspect_clojure`, `:cat`, `:refs`) answer one
+form or one var at a time, and each call parses again. None of them answers
+"what is in this module" in a form much smaller than the source.
+
+A localization quiz on 30 merged PRs of the same repository (issue #3) found a
+view that does: one line per var, made only from clj-kondo facts and
+docstrings (`λ name(args) | calls … | fx … | throws — first docstring
+sentence`). With it, a model named the changed vars with recall 0.586 against
+0.603 for the full source, equal precision, and 25% of the input tokens. Views
+that a model wrote (nucleus lambdas) and views that the model assembled itself
+with pulls did worse.
+
+### Approach
+
+One read-only MCP tool, `query_clojure`, gives an agent a REPL-like experience
+over the code base. It runs a small Clojure expression in SCI against an
+in-memory index of the workspace. The index holds one record for each
+top-level var, with its facets as keys and its relations as references to
+other vars.
+
+- **Ingest.** clj-kondo runs in process on the source paths of the workspace
+  and gives definitions, arglists, docstrings, var usages and keywords. The
+  index is plain Clojure data: an atom with one map for each workspace, with
+  derived reverse indexes for callers and keyword users. Persistent maps give
+  snapshot isolation. The first request for a workspace builds it.
+- **Freshness.** Before an answer, the server compares the mtime of each file
+  that the answer depends on with the mtime of its last ingest, and ingests a
+  changed file again first (stat, read, stat again). A project-wide question
+  checks each source file. No file watcher: the check alone keeps answers
+  fresh, and a watcher is a later performance step.
+- **Functions.** The SCI context binds these functions and nothing else that
+  can reach the host. Each returns plain data, so an expression can filter,
+  group and join before anything is rendered:
+  - `namespaces`: the namespaces of the index.
+  - `skeleton`: the vars of a namespace, the default answer to orientation.
+  - `form`: the exact source of named vars.
+  - `refs`: the uses of a var (call sites, values, refers), as in the CLI
+    `:refs`.
+  - `pull`: an EQL-style pull over the facets, with recursion and reverse
+    references (`:var/_calls`, `:var/_uses-kw`), for relations and targeted
+    reads.
+  - `help`: the functions and examples.
+- **Sessions.** A session keeps its `def`s between calls, as a REPL does, with
+  bounded contexts that expire when idle.
+- **Output.** Only the final value is rendered, as compact text, not EDN. A
+  skeleton renders one line for each var. A rendered skeleton has no size cap.
+  Other results have a cap, and a larger result is a typed refusal that names
+  a narrower call, as `relation_census` does. Each answer carries the file
+  hashes that it read.
+
+### Non-goals for slice A
+
+- No writes. The tool grants no mutation authority.
+- No file watcher and no persistence to disk. A server restart builds the
+  index again.
+- No durable var identity and no identity log. These are slice B (decision 1
+  of issue #3).
+- No model-written facets. Vars with no docstring have no intent clause.
+- No `q` (free Datalog) in the public function set. `pull` covers the measured
+  needs.
+- No change to the existing tools.
+
+### Key decisions
+
+- **Plain data, not a database.** Owner decision on issue #3 (it reverses the
+  earlier choice of Datahike `:mem`). clj-kondo gives the facts, and `pull`
+  is a small EQL-style interpreter over the map index. Persistence in slice B
+  can use a Transit snapshot, or a store behind the same interface.
+- **clj-kondo as a library, not the binary.** One analysis for each changed
+  file, in process. The index reads `:lint-as` from the project
+  `.clj-kondo/config.edn`. clj-kondo hooks are off, because they run code from
+  the repository (owner decision).
+- **The stale check, not a watcher.** Owner decision on issue #3.
+- **A REPL-like experience.** Owner decision. The functions return data, and a
+  session keeps its `def`s.
+- **SCI with an allowlist.** The context gets the functions above, pure
+  `clojure.core`, and `def` into the session namespace only: no `slurp`, no
+  `spit`, no interop, no `require`. This is new evaluation fence scope, and it
+  needs the executed fence review before merge.
+- **A deterministic skeleton.** The quiz measured the default view. It needs
+  no model and changes only when the source of a var changes.
+
+### Risks
+
+- **Dependency weight.** clj-kondo is a new JVM dependency of the MCP server.
+- **Session memory.** Each session holds its `def`s. The context count, the
+  idle time and the `def` count are bounded.
+- **Memory.** One index for each workspace. The ingest of a large repository
+  must stay bounded (a file cap, lazy ingest of large files).
+- **Evaluation fence.** A read verb has had code-execution holes before (see
+  "Fence review scope" in CLAUDE.md). The expression input of `query_clojure` is the highest-risk surface of
+  this tool.
+- **The quiz is a proxy.** It measured localization, not task success or
+  session cost. The success metric below is the real gate.
+
+### Success metrics
+
+- **Session cost.** In a live A/B on real code-work tasks of
+  pyze/modernization-mcp, the Claude Code cost of a session with the tool is
+  lower than without it, and the hidden tests of the task pass as often.
+- **Latency.** On a warm index of about 700 namespaces, `skeleton`, `form` and
+  `refs` answer in under 100 ms, and a typical `pull` in under 500 ms.
+- **Freshness.** No answer comes from a file whose mtime changed after its last
+  ingest.
+- **Cold build.** The first index of about 700 namespaces builds in under 30 s
+  and under 1 GB of heap.
+
 ## Two things called mission
 
 The **read mission** in [the read-path section](#compress-a-coherent-read-mission-without-guessing)
