@@ -29,6 +29,7 @@
    [clj-surgeon.receipt-artifacts :as artifacts]
    [clj-surgeon.relation-census :as relation-census]
    [clj-surgeon.rename :as rename]
+   [clj-surgeon.cat-symbol :as cat-symbol]
    [clj-surgeon.show-form :as show-form]
    [clj-surgeon.structural-lens :as structural-lens]
    [clojure.edn :as edn]
@@ -2048,6 +2049,30 @@
               (format-ls-tree-edn projects dir)
               (format-ls-tree-text projects dir))))))))
 
+(defn- run-show-form
+  "`:cat` entrance. `:sym` / `:syms` resolve namespaces to files under `:dir`
+   (default \".\"); every other call is the file-based `show-form/show`."
+  [{:keys [dir] :as opts}]
+  (if-not (or (contains? opts :sym) (contains? opts :syms))
+    (show-form/show opts)
+    (let [conflicts (->> [:file :form :forms :line :contains :spec :spec-file :format]
+                         (filter #(contains? opts %)) vec)
+          root (try (str (fs/absolutize (or dir "."))) (catch Exception _e (str dir)))]
+      (cond
+        (seq conflicts)
+        {:error ":sym / :syms cannot combine with other read selectors"
+         :error-type :conflicting-read-inputs
+         :conflicting-keys conflicts}
+
+        (not (existing-directory? root))
+        {:error (str ":cat :dir must be an existing directory: " (pr-str root))
+         :error-type :workspace-root-not-a-directory
+         :dir root}
+
+        :else
+        (let [files (vec (mapcat :files (discover-projects root)))]
+          (cat-symbol/show opts files))))))
+
 ;; ============================================================
 ;; Ops registry — single source of truth for dispatch + help
 ;; ============================================================
@@ -2423,10 +2448,13 @@
                        :examples  ["clj-surgeon :op :ls :file src/my/ns.clj"]
                        :category  :read}
 
-    :show-form        {:handler  show-form/show
-                       :desc     "Show exact top-level forms from one file snapshot or one guarded cross-file manifest"
+    :show-form        {:handler  run-show-form
+                       :desc     "Show exact top-level forms from one file snapshot, one guarded cross-file manifest, or qualified symbols"
                        :aliases  [:cat]
-                       :args     {:file     {:required true :desc "Clojure source file"}
+                       :args     {:file     {:required true :desc "Clojure source file (not needed with :sym / :syms)"}
+                                  :sym      {:desc "Qualified symbol my.ns/my-fn; no :file needed. The file is found under :dir"}
+                                  :syms     {:desc "EDN vector of up to 50 qualified symbols, such as '[a.b/c d.e/f]'; may span files"}
+                                  :dir      {:desc "Root for :sym / :syms lookup (default \".\"); source paths of deps.edn / bb.edn, as :ls-tree"}
                                   :form     {:desc "Unqualified top-level name; supply exactly one selector"}
                                   :forms    {:desc "Nonempty EDN vector of up to 50 unique top-level names; supply exactly one selector"}
                                   :line     {:desc "Positive one-based line; supply exactly one selector"}
@@ -2441,6 +2469,8 @@
                                   "Attach stdin in the same shell action: printf '%s\n' 'MANIFEST' | clj-surgeon :op :cat :spec-file -. Never invoke :spec-file - and wait to type the document later."
                                   "For a large behavior or architecture read, add :format :semantic. It prints compact canonical Clojure data with file hashes; comments and layout are omitted and reader shorthand may expand."
                                   "Keep the default :edn format when exact lexical source, comments, layout, or reader spelling matters."
+                                  "With a qualified symbol, skip :file: :sym my.ns/my-fn or :syms '[a.b/c d.e/f]' finds the file of each namespace under :dir and prints the same exact forms. Symbols over several files read each file once, all-or-nothing."
+                                  "An unknown namespace lists close namespace names; an unknown name lists the forms of that namespace. :sym cannot combine with :file or another selector."
                                   "Do not combine :spec or :spec-file with direct read arguments."
                                   "Batch reads are all-or-nothing: a missing, ambiguous, invalid, or duplicate name returns no partial source."
                                   "Cross-file manifests reject duplicate physical paths and unknown keys. Combined source over the declared limit, or the hard 65,536-character cap, refuses without partial source."
@@ -2453,6 +2483,8 @@
                                   "On ambiguity, stop and refine the selector; the command never chooses the first match."]
                        :examples ["clj-surgeon :op :cat :file src/my/ns.clj :form transition!"
                                   "clj-surgeon :op :cat :file src/my/ns.clj :forms '[transition! validate-state]'"
+                                  "clj-surgeon :op :cat :sym my.ns/transition!"
+                                  "clj-surgeon :op :cat :syms '[my.ns/transition! my.other/route]' :dir ."
                                   "printf '%s\n' '{:reads [{:file \"src/a.clj\" :forms [start stop]} {:file \"src/b.clj\" :forms [route]}] :expect {:file-count 2 :form-count 3}}' | clj-surgeon :op :cat :spec-file - :format :semantic"
                                   "clj-surgeon :op :cat :file src/my/ns.clj :line 1134"
                                   "clj-surgeon :op :cat :file src/my/ns.clj :contains :finish"
@@ -2911,7 +2943,9 @@
                                                        (not (contains? opts arg))
                                                        (not (and (= canonical :show-form)
                                                                  (= arg :file)
-                                                                 (contains? opts :spec))))
+                                                                 (or (contains? opts :spec)
+                                                                     (contains? opts :sym)
+                                                                     (contains? opts :syms)))))
                                               arg)))
                                     vec)]
                    (if (seq missing)

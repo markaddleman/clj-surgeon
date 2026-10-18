@@ -2401,6 +2401,11 @@
   clj-surgeon.scope-stream-test/the-walk-entry-ceiling-admits-exactly-its-limit-and-refuses-the-next
   clj-surgeon.scope-stream-test/the-walk-refuses-a-matching-symbolic-link-and-never-follows-it
   clj-surgeon.show-form-test/agent-facing-surfaces-do-not-drift
+  clj-surgeon.show-form-test/cat-sym-keeps-the-guards
+  clj-surgeon.show-form-test/cat-sym-reads-one-qualified-symbol-without-a-file
+  clj-surgeon.show-form-test/cat-sym-unknown-name-lists-the-forms-of-the-namespace
+  clj-surgeon.show-form-test/cat-sym-unknown-namespace-names-close-namespaces
+  clj-surgeon.show-form-test/cat-syms-read-several-symbols-in-one-and-two-files
   clj-surgeon.show-form-test/cli-cross-file-cat-loads-one-manifest-from-file-or-stdin
   clj-surgeon.show-form-test/cli-match-form-and-grep-form-aliases-are-one-shot-structural-search
   clj-surgeon.show-form-test/cli-selection-refusal-matrix-is-stable-edn-with-nonzero-exits

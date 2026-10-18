@@ -11,6 +11,13 @@ is cut.
 
 ## [Unreleased]
 
+- `:cat` now takes `:sym my.ns/my-fn` or `:syms '[a.b/c d.e/f]'` with no `:file`.
+  The op finds the file of each namespace under `:dir` (default `.`) with the
+  source paths of `deps.edn` and `bb.edn`, as `:ls-tree` does. It prints the same
+  exact forms as `:cat :file F :form NAME`. Symbols in one file are one read.
+  Symbols in several files are one all-or-nothing read. An unknown namespace
+  lists close namespace names. An unknown name lists the forms of the namespace.
+
 - Workspace onboarding now writes the Codex Surgeon entry as `required = false`.
   A required entry made Codex refuse to start in every onboarded workspace
   whenever the shared loopback service was down, and `up` or `recover` re-stamped
