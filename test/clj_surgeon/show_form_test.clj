@@ -1227,3 +1227,79 @@
         (is (str/includes? normalized "distinctive text") surface)))
     (is (not (str/includes? help "rg -n"))
         "show-form help must teach the one-call contains route")))
+
+;; ---------------------------------------------------------------------------
+;; :cat by qualified symbol (:sym / :syms, no :file)
+
+(defn- with-symbol-project
+  "Run `f` with the root of a small deps.edn project holding two namespaces."
+  [f]
+  (let [root (fs/create-temp-dir {:prefix "cat-symbol"})]
+    (try
+      (fs/create-dirs (fs/path root "src" "demo"))
+      (spit (str (fs/path root "deps.edn")) "{:paths [\"src\"]}")
+      (spit (str (fs/path root "src" "demo" "alpha_one.clj"))
+            "(ns demo.alpha-one)\n\n(defn first-fn [x]\n  (inc x))\n\n(defn second-fn []\n  :two)\n")
+      (spit (str (fs/path root "src" "demo" "beta.clj"))
+            "(ns demo.beta)\n\n(defn route [m]\n  (:route m))\n")
+      (f (str root))
+      (finally (fs/delete-tree root)))))
+
+(defn- cat-op [opts]
+  ((:handler (get core/ops-registry :show-form)) opts))
+
+(deftest cat-sym-reads-one-qualified-symbol-without-a-file
+  (with-symbol-project
+    (fn [root]
+      (let [result (cat-op {:sym 'demo.alpha-one/first-fn :dir root})]
+        (is (nil? (:error result)))
+        (is (= 'first-fn (:name result)))
+        (is (= "(defn first-fn [x]\n  (inc x))" (:source result)))
+        (is (str/ends-with? (:file result) "src/demo/alpha_one.clj"))
+        (is (= (dissoc result :selector)
+               (dissoc (cat-op {:file (:file result) :form 'first-fn}) :selector))
+            "same record as :file F :form NAME")))))
+
+(deftest cat-syms-read-several-symbols-in-one-and-two-files
+  (with-symbol-project
+    (fn [root]
+      (let [one-file (cat-op {:syms '[demo.alpha-one/second-fn demo.alpha-one/first-fn]
+                              :dir root})
+            two-files (cat-op {:syms '[demo.alpha-one/first-fn demo.beta/route]
+                               :dir root})]
+        (is (= '[second-fn first-fn] (mapv :name (:forms one-file)))
+            "requested order is kept within one file")
+        (is (= 2 (:file-count two-files)))
+        (is (= 2 (:form-count two-files)))
+        (is (= '[first-fn route]
+               (mapcat #(map :name (:forms %)) (:files two-files))))))))
+
+(deftest cat-sym-unknown-namespace-names-close-namespaces
+  (with-symbol-project
+    (fn [root]
+      (let [result (cat-op {:sym 'demo.alpha-on/first-fn :dir root})]
+        (is (= :namespace-not-found (:error-type result)))
+        (is (= ["demo.alpha-one"] (:candidates result)))
+        (is (str/includes? (:error result) "demo.alpha-one"))
+        (is (not (contains? result :source)))))))
+
+(deftest cat-sym-unknown-name-lists-the-forms-of-the-namespace
+  (with-symbol-project
+    (fn [root]
+      (let [result (cat-op {:sym 'demo.alpha-one/frist-fn :dir root})
+            batch (cat-op {:syms '[demo.beta/route demo.alpha-one/nope] :dir root})]
+        (is (= :symbol-not-found (:error-type result)))
+        (is (= ["first-fn" "second-fn"] (sort (:candidates result))))
+        (is (= "first-fn" (first (:candidates result))))
+        (is (= :symbol-not-found (:error-type batch)))
+        (is (not (contains? batch :files)) "all-or-nothing: no partial source")))))
+
+(deftest cat-sym-keeps-the-guards
+  (with-symbol-project
+    (fn [root]
+      (is (= :conflicting-read-inputs
+             (:error-type (cat-op {:sym 'demo.beta/route :form 'route :dir root}))))
+      (is (= :invalid-symbol
+             (:error-type (cat-op {:sym 'route :dir root}))))
+      (is (= :workspace-root-not-a-directory
+             (:error-type (cat-op {:sym 'demo.beta/route :dir (str root "/missing")})))))))
