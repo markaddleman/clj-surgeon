@@ -2453,6 +2453,8 @@
   clj-surgeon.split-proof-gate-test/receipt-ceiling-bounds-edn-and-escaped-json-independently
   clj-surgeon.split-proof-gate-test/status-retains-cold-and-trivial-proof-honesty
   clj-surgeon.state-home-admission-test/configured-root-cartesian-matrix
+  clj-surgeon.state-home-admission-test/read-only-operation-does-not-need-the-passwd-home
+  clj-surgeon.state-home-admission-test/write-envelope-still-refuses-without-the-passwd-home
   clj-surgeon.structural-lens-test/apply-rejects-invalid-plan-version-and-invalid-result-source
   clj-surgeon.structural-lens-test/applying-a-plan-fails-closed-when-source-changed
   clj-surgeon.structural-lens-test/every-planner-refuses-to-use-a-source-file-as-a-plan-artifact
