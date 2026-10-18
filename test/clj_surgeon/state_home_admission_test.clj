@@ -1,9 +1,11 @@
 (ns clj-surgeon.state-home-admission-test
   {:lane :fast}
   (:require
+   [clj-surgeon.core :as core]
    [clj-surgeon.probe-state :as state]
    [clj-surgeon.receipt-artifacts :as artifacts]
    [clojure.java.io :as io]
+   [clojure.string :as str]
    [clojure.test :refer [deftest is]])
   (:import
    (java.nio.file Files)
@@ -62,3 +64,36 @@
         (with-open [paths (Files/walk container (make-array java.nio.file.FileVisitOption 0))]
           (doseq [path (reverse (sort (iterator-seq (.iterator paths))))]
             (Files/delete path)))))))
+
+(defn- with-failing-passwd-home
+  "Run `f` with a fresh launcher envelope and a passwd lookup that throws, the
+   way it throws inside the macOS Claude Code sandbox (dscl is blocked)."
+  [f]
+  (let [artifacts-ns (the-ns 'clj-surgeon.receipt-artifacts)
+        var-of #(ns-resolve artifacts-ns %)]
+    (with-redefs-fn
+      {(var-of 'launcher-envelope) (atom nil)
+       (var-of 'passwd-home) #(throw (ex-info "Cannot determine invoking user's passwd home"
+                                              {:error-type :invalid-operation-context
+                                               :attempts []}))}
+      #(binding [artifacts/*destination-envelope* nil]
+         (f)))))
+
+(deftest read-only-operation-does-not-need-the-passwd-home
+  ;; The launcher initializes the envelope for EVERY operation. That must not
+  ;; look up the passwd home: a read-only op writes nothing.
+  (with-failing-passwd-home
+    (fn []
+      (let [out (with-out-str
+                  (core/-main ":op" ":ls" ":file" "src/clj_surgeon/receipt_artifacts.clj"))]
+        (is (not (str/includes? out ":error")) out)
+        (is (str/includes? out "passwd-home") out)))))
+
+(deftest write-envelope-still-refuses-without-the-passwd-home
+  ;; Security intent: a write never falls back to $HOME.
+  (with-failing-passwd-home
+    (fn []
+      (is (nil? (artifacts/initialize-envelope! "/work")))
+      (let [data (try (artifacts/current-envelope) nil
+                      (catch Exception e (ex-data e)))]
+        (is (= :invalid-operation-context (:error-type data)))))))

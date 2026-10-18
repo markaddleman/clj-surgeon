@@ -129,7 +129,15 @@
       (safe-sh "dscl" "." "-read" (str "/Users/" username) "NFSHomeDirectory")
       parse-dscl-home)))
 
-(defn- passwd-home []
+(defn- passwd-home
+  "The invoking user's home from the system user database, never from $HOME.
+
+   The write envelope roots its allowed destinations at this directory. $HOME
+   is an environment variable that the caller controls, so a write must not
+   trust it: when this function cannot find the passwd home, the write is
+   refused with :invalid-operation-context. Read-only operations never call
+   this function, because the envelope is lazy (see `initialize-envelope!`)."
+  []
   (let [username (System/getProperty "user.name")
         entry (some #(let [fields (str/split % #":")]
                        (when (= username (first fields)) (nth fields 5 nil)))
@@ -155,21 +163,40 @@
 
 (defonce ^:private policy-default-delay
   (delay (default-envelope (System/getProperty "user.dir") :policy-default)))
-(defonce ^:private launcher-envelope (atom nil))
+(defonce ^:private launcher-envelope
+  ;; nil, or a delay of the launcher envelope. A delay: the default envelope
+  ;; needs the passwd home, and a read-only operation must work where that
+  ;; lookup fails (the macOS Claude Code sandbox blocks dscl).
+  (atom nil))
 (def ^:dynamic *destination-envelope* nil)
+
+(defn- launcher-envelope-value []
+  (some-> @launcher-envelope deref))
 
 ;; @spec DATACODE-ENV-002, DATACODE-ENV-003
 (defn initialize-envelope!
-  "Launcher-only initialization. Later workspace requests cannot widen it."
+  "Launcher-only initialization. Later workspace requests cannot widen it.
+
+   With a supplied envelope, validates it now and returns it. With none, the
+   default envelope is LAZY: nothing here reads the passwd home. The first
+   write path that calls `current-envelope` forces it, and it refuses there
+   when the passwd home is unknown. Returns nil until the envelope exists."
   ([workspace] (initialize-envelope! workspace nil))
   ([workspace supplied]
-   (or @launcher-envelope
-       (let [envelope (validated-envelope! (or supplied (default-envelope workspace :launcher)))]
-         (compare-and-set! launcher-envelope nil envelope)
-         @launcher-envelope))))
+   (when-not @launcher-envelope
+     (compare-and-set! launcher-envelope nil
+                       (if supplied
+                         (doto (delay (validated-envelope! supplied)) deref)
+                         (delay (validated-envelope!
+                                  (default-envelope workspace :launcher))))))
+   (let [d @launcher-envelope]
+     (when (realized? d) @d))))
 
-(defn current-envelope []
-  (or *destination-envelope* @launcher-envelope @policy-default-delay))
+(defn current-envelope
+  "The envelope of the current write. Forces the lazy default, so it throws
+   when the passwd home is unknown. Call it only on the path of a write."
+  []
+  (or *destination-envelope* (launcher-envelope-value) @policy-default-delay))
 
 (def ^:private ^:dynamic *resolution-interleave*
   "The witness seam inside this resolution's two CHECK-THEN-ACT windows, or nil.
