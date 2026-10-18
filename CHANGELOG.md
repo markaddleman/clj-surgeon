@@ -17,6 +17,12 @@ is cut.
   exact forms as `:cat :file F :form NAME`. Symbols in one file are one read.
   Symbols in several files are one all-or-nothing read. An unknown namespace
   lists close namespace names. An unknown name lists the forms of the namespace.
+- New read-only operation `:refs`. It lists the cross-file references of one var.
+  Give `:sym my.ns/my-fn`, or `:file` and `:form`. Each line shows the file, the
+  line, the enclosing top-level form and the kind: `call`, `alias-call`, `value`
+  or `refer`. The operation uses the clj-kondo analysis, so aliases, `:refer`
+  and shadowing locals are correct. It covers `.clj`, `.cljs` and `.cljc`.
+  `:include-tests false`, `:context true` and `:format :edn` are options.
 
 - Workspace onboarding now writes the Codex Surgeon entry as `required = false`.
   A required entry made Codex refuse to start in every onboarded workspace

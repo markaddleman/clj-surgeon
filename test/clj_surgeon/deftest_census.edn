@@ -887,6 +887,17 @@
   clj-surgeon.lens-query-test/sibling-spans-address-peer-shaped-and-flattened-syntax
   clj-surgeon.lens-query-test/span-reads-report-overlap-and-boundaries-while-plans-refuse-ambiguity
   clj-surgeon.lens-query-test/span-updater-plans-one-slice-and-preserves-all-internal-trivia
+  clj-surgeon.ls-tree-test/refs-compact-format-has-one-line-per-ref-and-a-total
+  clj-surgeon.ls-tree-test/refs-definition-is-found-in-the-analysis
+  clj-surgeon.ls-tree-test/refs-fixture-compact-output-and-context
+  clj-surgeon.ls-tree-test/refs-fixture-covers-every-kind-and-skips-the-shadowing-local
+  clj-surgeon.ls-tree-test/refs-fixture-file-and-form-name-the-same-var-as-sym
+  clj-surgeon.ls-tree-test/refs-fixture-include-tests-false-leaves-test-files-out
+  clj-surgeon.ls-tree-test/refs-is-a-registered-read-only-op
+  clj-surgeon.ls-tree-test/refs-ns-of-source-reads-the-first-ns-form
+  clj-surgeon.ls-tree-test/refs-parse-sym-splits-namespace-and-name
+  clj-surgeon.ls-tree-test/refs-refusals-are-typed
+  clj-surgeon.ls-tree-test/refs-usages-become-one-ref-for-each-position
   clj-surgeon.ls-tree-test/test-extract-ns-requires-basic
   clj-surgeon.ls-tree-test/test-extract-ns-requires-cljc-reader-conditional
   clj-surgeon.ls-tree-test/test-extract-ns-requires-cljc-splicing

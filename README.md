@@ -1761,6 +1761,26 @@ same question.
 
 See [docs/ls-tree.md](docs/ls-tree.md) for full documentation.
 
+#### `:refs` — Cross-file references of one var
+
+```bash
+clj-surgeon :op :refs :sym my.ns/my-fn
+clj-surgeon :op :refs :file src/my/ns.clj :form my-fn :dir . :include-tests false
+```
+
+Each line is `<file>:<line> <ns>/<top-level form> <kind>`. The kind is `call`,
+`alias-call` (a call through an `:as` alias), `value` (the var passed or
+referenced without a call) or `refer` (the name in an ns `:refer`). A total line
+ends the output. `:context true` adds the source line. `:format :edn` returns a
+vector of `{:file :line :col :ns :form :kind}`.
+
+The operation runs the `clj-kondo` analysis, so aliases, `:refer`, `:rename`
+and local bindings that shadow the var are resolved for each file. It covers
+`.clj`, `.cljs` and `.cljc`. It reads the source paths of `deps.edn`, `bb.edn`
+or `project.clj` like `:ls-tree`, and adds the `test` and `tests` directories
+unless `:include-tests false`. Only files that contain the var name go to
+kondo. It needs `clj-kondo` on the `PATH`.
+
 #### `:ls-deps` — Transitive dependency tree
 
 ```bash
