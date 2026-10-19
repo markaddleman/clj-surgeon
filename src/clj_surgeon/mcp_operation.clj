@@ -215,6 +215,38 @@
                        :elapsed-ms elapsed-ms})))
     (assoc domain-result :elapsed_ms elapsed-ms)))
 
+;; @spec MCP-OP-QUERY-126
+;; @spec MCP-OP-QUERY-127
+(defn- contained-refusal
+  "The typed refusal that `invoke!` publishes when a `Throwable` escaped the
+   domain execution, the summary or the callback. A `StackOverflowError` gives
+   `expression-too-deep`; any other `Throwable` gives `internal-error`, with the
+   class and the message, and no stack trace."
+  [operation ^Throwable t elapsed-ms]
+  (let [overflow? (instance? StackOverflowError t)
+        text (str (.getName (class t)) (when-let [m (ex-message t)] (str ": " m)))]
+    (canonicalize-receipt-text
+     {:ok false
+      :operation operation
+      :error_type (if overflow? "expression-too-deep" "internal-error")
+      :error text
+      :remedy (if overflow?
+                "The request nests too deeply. Flatten the expression, or split it into several requests."
+                "Send the request again. If it fails again, report the failure with this text.")
+      :elapsed_ms elapsed-ms})))
+
+(defn- publish-contained!
+  "Publish `refusal` through `summarize` and `callback`, and return its body.
+   A throw of the summary or the callback is dropped: the refusal is the last
+   word and nothing may escape."
+  [{:keys [summarize serialize callback]} refusal]
+  (let [summary (try (summarize refusal)
+                     (catch Throwable _
+                       (str (:operation refusal) " refused · " (:error_type refusal)
+                            "\n" (:error refusal))))]
+    (try (callback [summary] true refusal) (catch Throwable _ nil))
+    (try (serialize refusal) (catch Throwable _ (json/generate-string refusal)))))
+
 ;; @spec MCP-OP-RESULT-001
 ;; @spec MCP-OP-RESULT-002
 ;; @spec MCP-OP-RESULT-003
@@ -223,8 +255,32 @@
 ;; @spec MCP-OP-RESULT-006
 ;; @spec MCP-OP-TIME-001
 ;; @spec MCP-OP-TIME-002
+(defn- invoke-plain!
+  "The body of `invoke!`: execute and publish one public MCP operation.
+   A throw of any step leaves to the caller."
+  [{:keys [clock-nanos execute summarize serialize callback guard]}]
+  (let [started-ns (clock-nanos)
+        domain-result (execute)
+        finished-ns (clock-nanos)
+        finalized (finalize-result domain-result started-ns finished-ns)
+        finalized-summary (summarize finalized)
+        replacement (when guard (guard finalized finalized-summary))
+        result (or replacement finalized)
+        summary (if replacement (summarize result) finalized-summary)
+        body (serialize result)]
+    (callback [summary] (not (:ok result)) result)
+    body))
+
+;; @spec MCP-OP-QUERY-127
 (defn invoke!
   "Execute and publish one public MCP operation through a single finalizer.
+
+  The optional `operation` (a string, the public name of the operation) turns on
+  containment: `invoke!` then never lets a `Throwable` escape. If `execute`,
+  `summarize` or the callback throws, it publishes the typed refusal
+  `internal-error` (or `expression-too-deep` for a `StackOverflowError`) with
+  `elapsed_ms` and returns its body (MCP-OP-QUERY-127). Without `operation`
+  every throw leaves, as MCP-OP-RESULT-001 to 006 pin for the other operations.
 
   The request clock surrounds domain execution only. Summary rendering and
   serialization both complete before callback publication, so failures cannot
@@ -237,17 +293,21 @@
   re-summarized and nothing after the guard can grow the envelope. A guard
   that will not accept its own replacement is a defect in the guard, so the
   replacement is published once and not re-guarded."
-  [{:keys [clock-nanos execute summarize serialize callback guard]
+  [{:keys [operation clock-nanos serialize] :as options
     :or {clock-nanos #(System/nanoTime)
          serialize json/generate-string}}]
-  (let [started-ns (clock-nanos)
-        domain-result (execute)
-        finished-ns (clock-nanos)
-        finalized (finalize-result domain-result started-ns finished-ns)
-        finalized-summary (summarize finalized)
-        replacement (when guard (guard finalized finalized-summary))
-        result (or replacement finalized)
-        summary (if replacement (summarize result) finalized-summary)
-        body (serialize result)]
-    (callback [summary] (not (:ok result)) result)
-    body))
+  (let [options (assoc options :clock-nanos clock-nanos :serialize serialize)]
+    (if-not operation
+      (invoke-plain! options)
+      (let [started (volatile! nil)
+            tick (fn [] (let [n (clock-nanos)]
+                          (when (nil? @started) (vreset! started n))
+                          n))]
+        (try
+          (invoke-plain! (assoc options :clock-nanos tick))
+          (catch Throwable t
+            (let [now (try (clock-nanos) (catch Throwable _ nil))
+                  elapsed (if (and now @started)
+                            (/ (max 0.0 (double (- now @started))) 1000000.0)
+                            0.0)]
+              (publish-contained! options (contained-refusal operation t elapsed)))))))))

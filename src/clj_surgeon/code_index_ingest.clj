@@ -237,7 +237,8 @@
       (intent doc) (assoc :intent (intent doc)))))
 
 (defn- first-per-qname
-  "The var records, source order, with the first one of each qname kept."
+  "The var records, source order, with the first one of each qname kept. The
+   records all belong to one platform, so the qname is the identity."
   [records]
   (:out
    (reduce (fn [{:keys [seen] :as acc} r]
@@ -262,6 +263,53 @@
               (map (fn [u] [[(:line u) (:col u) (:from u) (:target u) (:kind u)
                              (:file u)] u]))
               uses)))
+
+;; ---------------------------------------------------------------------------
+;; platforms of a var
+;; ---------------------------------------------------------------------------
+
+(defn- file-platforms
+  "The platforms that the analysis of the file at `path` covers: `[:clj :cljs]`
+   for a `.cljc` file, `[:cljs]` for a `.cljs` file, otherwise `[:clj]`."
+  [^String path]
+  (cond
+    (str/ends-with? path ".cljc") [:clj :cljs]
+    (str/ends-with? path ".cljs") [:cljs]
+    :else [:clj]))
+
+(def ^:private compared-facts
+  "The facts of a var record that decide whether the two platform versions of a
+   `.cljc` var are one record."
+  [:arglists :calls :fx :uses-kw :reads-kw :throws? :kind :private? :doc
+   :start :end :source])
+
+(defn- comparable-facts
+  "The facts of a record that the platform comparison uses. The defining macro
+   of kondo differs by name only (`clojure.core/defn` and `cljs.core/defn`), so
+   the `cljs.core` prefix of the kind counts as `clojure.core`."
+  [record]
+  (-> (select-keys record compared-facts)
+      (update :kind #(some-> % (str/replace-first #"^cljs\.core/" "clojure.core/")))))
+
+;; @spec MCP-OP-QUERY-099
+(defn- merge-platform-versions
+  "The records of one qname from the platforms of a file, `:clj` before
+   `:cljs`. Two records with equal facts become one record of the `:clj`
+   version with `:platform :cljc`. One record keeps its platform."
+  [{clj-v :clj cljs-v :cljs}]
+  (cond
+    (and clj-v cljs-v)
+    (if (= (comparable-facts clj-v) (comparable-facts cljs-v))
+      [(assoc clj-v :platform :cljc)]
+      [clj-v cljs-v])
+    clj-v [clj-v]
+    :else [cljs-v]))
+
+(defn- in-lang?
+  "True when the kondo entry `x` belongs to `lang`. An entry without `:lang`
+   (a file that is not `.cljc`) belongs to every language."
+  [lang x]
+  (or (nil? (:lang x)) (= lang (:lang x))))
 
 ;; ---------------------------------------------------------------------------
 ;; file-result
@@ -307,35 +355,75 @@
   [analysis]
   (first (sort-by (juxt :row :col) (:namespace-definitions analysis))))
 
+;; @spec MCP-OP-QUERY-099
+(defn- platform-records
+  "The var records of one platform of the file, source order, with the first
+   definition of each qname kept."
+  [path lines ns-name analysis cljc? platform]
+  (let [keep-lang (if cljc? (partial in-lang? platform) (constantly true))
+        uses (dedupe-uses (keep #(usage->use path %)
+                                (filter keep-lang (:var-usages analysis))))
+        uses-by-var (group-by :from uses)
+        kws-by-var (group-by #(when (:from-var %) (str (:from %) "/" (:from-var %)))
+                             (filter keep-lang (:keywords analysis)))]
+    (->> (:var-definitions analysis)
+         (filter keep-lang)
+         (filter #(= ns-name (str (:ns %))))
+         (sort-by (juxt :row :col))
+         (map (fn [d]
+                (let [q (str ns-name "/" (:name d))]
+                  (assoc (var-record path lines d
+                                     (get uses-by-var q)
+                                     (get kws-by-var q))
+                         :platform platform))))
+         first-per-qname)))
+
+(defn- platform-order
+  [r]
+  (case (:platform r) :cljc 0 :clj 0 :cljs 1))
+
+(defn- file-vars
+  "The var records of a file: one record for each (var, platform), source
+   order, the `:clj` record before the `:cljs` record at one position."
+  [path lines ns-name analysis]
+  (let [platforms (file-platforms path)
+        cljc? (= 2 (count platforms))
+        by-platform (into {}
+                          (map (fn [pf]
+                                 [pf (platform-records path lines ns-name
+                                                       analysis cljc? pf)]))
+                          platforms)
+        by-qname (apply merge-with merge
+                        (for [[pf recs] by-platform
+                              r recs]
+                          {(:qname r) {pf r}}))]
+    (->> by-qname
+         vals
+         (mapcat merge-platform-versions)
+         (sort-by (juxt :start platform-order))
+         vec)))
+
 ;; @spec MCP-OP-QUERY-017
 ;; @spec MCP-OP-QUERY-020
 ;; @spec MCP-OP-QUERY-045
+;; @spec MCP-OP-QUERY-098
+;; @spec MCP-OP-QUERY-099
 (defn file-result
   "The file result of one file input `{:path :text :mtime :size :sha256
    :lint-as}`. It runs clj-kondo on the text and touches no file. A text with a
-   syntax error gives a partial or empty result. Throws `:invalid-file-input`
-   for a bad input and `:index-unavailable` when kondo throws."
+   syntax error gives a partial or empty result. A `.cljc` file gives one
+   record for each platform on which a var differs (MCP-OP-QUERY-099). Throws
+   `:invalid-file-input` for a bad input and `:index-unavailable` when kondo
+   throws."
   [file-input]
   (validate-input! file-input)
   (let [{:keys [path text mtime size sha256 lint-as]} file-input
         analysis (run-kondo path text lint-as)
         ns-def (first-namespace analysis)
         ns-name (if ns-def (str (:name ns-def)) "user")
-        lines (str/split text #"\n" -1)
+        lines (vec (str/split text #"\n" -1))
         all-uses (dedupe-uses (keep #(usage->use path %) (:var-usages analysis)))
-        uses-by-var (group-by :from all-uses)
-        kws-by-var (group-by #(when (:from-var %) (str (:from %) "/" (:from-var %)))
-                             (:keywords analysis))
-        defs (->> (:var-definitions analysis)
-                  (filter #(= ns-name (str (:ns %))))
-                  (sort-by (juxt :row :col)))
-        vars (->> defs
-                  (map (fn [d]
-                         (let [q (str ns-name "/" (:name d))]
-                           (var-record path (vec lines) d
-                                       (get uses-by-var q)
-                                       (get kws-by-var q)))))
-                  first-per-qname)
+        vars (file-vars path lines ns-name analysis)
         uses (->> all-uses
                   (remove #(clojure-ns? (:target-ns %)))
                   (map public-use)

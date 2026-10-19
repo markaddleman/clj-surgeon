@@ -368,6 +368,123 @@
         (is (true? (:read-complete? d)))))))
 
 ;; ---------------------------------------------------------------------------
+;; MCP-OP-QUERY-120 the config-byte cap (issue #11)
+;; ---------------------------------------------------------------------------
+
+(def ^:private big-padding
+  "A comment line that makes a build file bigger than 100 bytes."
+  (str ";; " (str/join (repeat 120 "x")) "\n"))
+
+;; @spec MCP-OP-QUERY-120
+(deftest a-build-file-over-the-config-byte-cap-is-not-read-and-is-skipped
+  (with-dirs
+    (fn [root _]
+      (let [text (str big-padding "{:paths [\"lib\"]}")]
+        (put! root "deps.edn" text)
+        (put! root "lib/l.clj" (clj "l"))
+        (put! root "src/s.clj" (clj "s"))
+        (put! root "test/t.clj" (clj "t"))
+        (let [d (disc/discover root {:max-config-bytes 100})]
+          (testing "the build file adds only its test directory"
+            (is (= ["test/t.clj"] (paths d))))
+          (is (= [{:file "deps.edn" :reason :too-large :size (count text)}] (:skipped d)))
+          (is (false? (:read-complete? d))))))))
+
+;; @spec MCP-OP-QUERY-120
+(deftest a-build-file-at-the-config-byte-cap-is-read
+  (with-dirs
+    (fn [root _]
+      (let [text "{:paths [\"lib\"]}"]
+        (put! root "deps.edn" text)
+        (put! root "lib/l.clj" (clj "l"))
+        (let [d (disc/discover root {:max-config-bytes (count text)})]
+          (is (= ["lib/l.clj"] (paths d)))
+          (is (= [] (:skipped d)))
+          (is (true? (:read-complete? d))))))))
+
+;; @spec MCP-OP-QUERY-120
+(deftest a-build-file-in-a-subdirectory-is-skipped-with-its-relative-path
+  (with-dirs
+    (fn [root _]
+      (let [text (str big-padding "{:paths [\"lib\"]}")]
+        (put! root "sub/project.clj" text)
+        (put! root "sub/lib/l.clj" (clj "l"))
+        (let [d (disc/discover root {:max-config-bytes 100})]
+          (is (= [] (paths d)))
+          (is (= [{:file "sub/project.clj" :reason :too-large :size (count text)}]
+                 (:skipped d))))))))
+
+;; @spec MCP-OP-QUERY-120
+(deftest the-config-byte-cap-defaults-to-one-mebibyte
+  (with-dirs
+    (fn [root _]
+      (let [text (str ";; " (str/join (repeat 1048576 "x")) "\n{:paths [\"lib\"]}")]
+        (put! root "deps.edn" text)
+        (put! root "lib/l.clj" (clj "l"))
+        (let [d (disc/discover root {})]
+          (is (= [] (paths d)))
+          (is (= [{:file "deps.edn" :reason :too-large :size (count text)}] (:skipped d))))))))
+
+;; @spec MCP-OP-QUERY-120
+(deftest a-kondo-config-over-the-config-byte-cap-adds-no-lint-as-entry
+  (with-dirs
+    (fn [root _]
+      (let [text (str big-padding "{:lint-as {a/b clojure.core/def}}")]
+        (put! root "deps.edn" "{:paths [\"src\"]}")
+        (put! root "src/s.clj" (clj "s"))
+        (put! root ".clj-kondo/config.edn" text)
+        (let [d (disc/discover root {:max-config-bytes 100})]
+          (is (= {} (:lint-as d)))
+          (is (= ["src/s.clj"] (paths d)))
+          (is (= [{:file ".clj-kondo/config.edn" :reason :too-large :size (count text)}]
+                 (:skipped d)))
+          (is (false? (:read-complete? d))))
+        (testing "under the cap the entry applies"
+          (let [d (disc/discover root {:max-config-bytes 10000})]
+            (is (= '{a/b clojure.core/def} (:lint-as d)))
+            (is (true? (:read-complete? d)))))))))
+
+;; @spec MCP-OP-QUERY-120
+(deftest read-lint-as-with-a-cap-gives-an-empty-map-for-a-big-config
+  (with-dirs
+    (fn [root _]
+      (put! root ".clj-kondo/config.edn"
+            (str big-padding "{:lint-as {a/b clojure.core/def}}"))
+      (is (= {} (disc/read-lint-as root 100)))
+      (is (= '{a/b clojure.core/def} (disc/read-lint-as root 10000))))))
+
+;; ---------------------------------------------------------------------------
+;; MCP-OP-QUERY-108 the refresh time bound covers discovery (issue #11)
+;; ---------------------------------------------------------------------------
+
+;; @spec MCP-OP-QUERY-108
+(deftest discovery-stops-with-a-timeout-when-the-time-bound-has-passed
+  (with-dirs
+    (fn [root _]
+      (put! root "deps.edn" "{:paths [\"src\"]}")
+      (put! root "src/a.clj" (clj "a"))
+      (put! root "src/b.clj" (clj "b"))
+      (let [e (try (disc/discover root {:expired? (constantly true)})
+                   (catch clojure.lang.ExceptionInfo e e))]
+        (is (instance? clojure.lang.ExceptionInfo e))
+        (is (= :timeout (:error-type (ex-data e)))))
+      (testing "a bound that has not passed changes nothing"
+        (is (= ["src/a.clj" "src/b.clj"]
+               (paths (disc/discover root {:expired? (constantly false)}))))))))
+
+;; @spec MCP-OP-QUERY-108
+(deftest discovery-checks-the-time-bound-before-each-file
+  (with-dirs
+    (fn [root _]
+      (put! root "deps.edn" "{:paths [\"src\"]}")
+      (dotimes [i 5] (put! root (str "src/f" i ".clj") (clj (str "f" i))))
+      (let [calls (atom 0)
+            e (try (disc/discover root {:expired? #(> (swap! calls inc) 3)})
+                   (catch clojure.lang.ExceptionInfo e e))]
+        (is (= :timeout (:error-type (ex-data e))))
+        (is (< @calls 20) "the check stops the walk")))))
+
+;; ---------------------------------------------------------------------------
 ;; Defect guard
 ;; ---------------------------------------------------------------------------
 

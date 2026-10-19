@@ -24,6 +24,7 @@
 
 (def ^:private default-max-files 10000)
 (def ^:private default-max-file-bytes 2097152)
+(def ^:private default-max-config-bytes 1048576)
 (def ^:private max-build-depth 3)
 (def ^:private skipped-directory-names #{"node_modules" "target"})
 (def ^:private build-file-names ["deps.edn" "bb.edn" "project.clj"])
@@ -65,13 +66,27 @@
 ;; Build files
 ;; ---------------------------------------------------------------------------
 
+(defn- check-deadline!
+  "Throw `:timeout` when the refresh time bound has passed. `expired?` is a
+   zero-argument function or nil."
+  [expired?]
+  (when (and expired? (expired?))
+    (throw (ex-info "the refresh time bound passed during discovery"
+                    {:error-type :timeout :phase :discovery}))))
+
+;; @spec MCP-OP-QUERY-120
 (defn- read-first-form
   "Read the first form of the file with clojure.edn. Nil when it cannot be read.
-   Never evaluates: `#=` is an unknown tag to the edn reader and throws."
-  [^File file]
+   Reads at most `max-bytes` bytes: a file that holds more is not parsed and
+   gives `{:too-large size}`, with `size` the length of the file. Never
+   evaluates: `#=` is an unknown tag to the edn reader and throws."
+  [^File file max-bytes]
   (try
-    (let [form (edn/read-string (slurp file))]
-      {:form form})
+    (let [^bytes data (with-open [in (Files/newInputStream (.toPath file) (make-array java.nio.file.OpenOption 0))]
+                        (.readNBytes in (int (inc max-bytes))))]
+      (if (> (alength data) max-bytes)
+        {:too-large (.length file)}
+        {:form (edn/read-string (String. data "UTF-8"))}))
     (catch Throwable _ nil)))
 
 (defn- strings-only
@@ -100,19 +115,27 @@
     nil))
 
 (defn- build-dir-source-paths
-  "The relative source-path strings that the build files of one directory give.
-   A build file that cannot be read contributes nothing here. The test and
-   tests directories are added by the caller."
-  [^File dir]
-  (vec
-   (mapcat
-    (fn [fname]
-      (let [f (File. dir ^String fname)]
-        (when (.isFile f)
-          (some->> (read-first-form f)
-                   :form
-                   (source-paths-of fname)))))
-    build-file-names)))
+  "The relative source-path strings that the build files of one directory give,
+   and the build files that were too large to read:
+   `{:paths [...] :skipped [{:file :reason :size}]}`. A build file that cannot
+   be read contributes nothing here. The test and tests directories are added
+   by the caller."
+  [^Path root ^File dir max-config-bytes expired?]
+  (reduce
+   (fn [acc fname]
+     (let [f (File. dir ^String fname)]
+       (check-deadline! expired?)
+       (if-not (.isFile f)
+         acc
+         (let [read (read-first-form f max-config-bytes)]
+           (if-let [size (:too-large read)]
+             (update acc :skipped conj
+                     {:file (str/join "/" (map str (.relativize root (.toPath f))))
+                      :reason :too-large
+                      :size size})
+             (update acc :paths into (some->> read :form (source-paths-of fname))))))))
+   {:paths [] :skipped []}
+   build-file-names))
 
 (defn- has-build-file?
   [^File dir]
@@ -139,20 +162,26 @@
 
 (defn- source-roots
   "Lexical, normalized directory paths that are source paths, confined to the
-   root by realpath. Source paths that do not exist or lie outside are dropped."
-  [^Path root ^File root-file]
-  (->> (build-directories root-file)
-       (mapcat
-        (fn [^File dir]
-          (let [declared (build-dir-source-paths dir)
-                tests    (filter #(.isDirectory (File. dir ^String %)) ["test" "tests"])]
-            (map (fn [p] (.normalize (.resolve (.toPath dir) ^String p)))
-                 (distinct (concat declared tests))))))
-       (filter (fn [^Path p]
-                 (let [real (real-path p)]
-                   (and (inside-root? root real) (real-directory? real)))))
-       distinct
-       vec))
+   root by realpath, and the build files that were too large to read:
+   `{:dirs [...] :skipped [...]}`. Source paths that do not exist or lie outside
+   are dropped."
+  [^Path root ^File root-file max-config-bytes expired?]
+  (let [per-dir (mapv
+                 (fn [^File dir]
+                   (let [{:keys [paths skipped]}
+                         (build-dir-source-paths root dir max-config-bytes expired?)
+                         tests (filter #(.isDirectory (File. dir ^String %)) ["test" "tests"])]
+                     {:dirs (map (fn [p] (.normalize (.resolve (.toPath dir) ^String p)))
+                                 (distinct (concat paths tests)))
+                      :skipped skipped}))
+                 (build-directories root-file))]
+    {:dirs (->> (mapcat :dirs per-dir)
+                (filter (fn [^Path p]
+                          (let [real (real-path p)]
+                            (and (inside-root? root real) (real-directory? real)))))
+                distinct
+                vec)
+     :skipped (vec (mapcat :skipped per-dir))}))
 
 ;; ---------------------------------------------------------------------------
 ;; Walk
@@ -175,7 +204,7 @@
   "Walk the source roots. Returns {:files [...] :skipped [...]}. Every source
    file found counts toward the cap. A link whose realpath leaves the root is
    not followed and not read. A real directory or file is visited once."
-  [^Path root source-dirs max-files max-file-bytes]
+  [^Path root source-dirs max-files max-file-bytes expired?]
   (let [files         (volatile! [])
         skipped       (volatile! [])
         seen-files    (volatile! #{})
@@ -184,6 +213,7 @@
         capped?       (volatile! false)
         visit-file
         (fn [^File f ^Path lexical]
+          (check-deadline! expired?)
           (let [real (real-path lexical)]
             (when (and (inside-root? root real)
                        (not (contains? @seen-files (str real)))
@@ -225,24 +255,41 @@
 ;; ---------------------------------------------------------------------------
 
 ;; @spec MCP-OP-QUERY-019
+;; @spec MCP-OP-QUERY-120
+(defn- read-lint-as*
+  "`{:lint-as map :skipped [...]}` from `<root>/.clj-kondo/config.edn`. A config
+   over `max-config-bytes` is not read: it adds no entry and is listed as
+   `:too-large`."
+  [root max-config-bytes]
+  (let [file (File. (str root) ".clj-kondo/config.edn")]
+    (if-not (.isFile file)
+      {:lint-as {} :skipped []}
+      (let [read (read-first-form file max-config-bytes)]
+        (if-let [size (:too-large read)]
+          {:lint-as {}
+           :skipped [{:file ".clj-kondo/config.edn" :reason :too-large :size size}]}
+          (let [lint-as (some-> read :form (get :lint-as))]
+            {:lint-as (if (map? lint-as) lint-as {}) :skipped []}))))))
+
+;; @spec MCP-OP-QUERY-019
 (defn read-lint-as
   "Read `<root>/.clj-kondo/config.edn` with clojure.edn and return its
    `:lint-as` map. Everything else, `:hooks` included, is dropped. A missing or
-   unreadable file, or a `:lint-as` that is not a map, gives {}. Nothing is
-   evaluated."
-  [root]
-  (let [file (File. (str root) ".clj-kondo/config.edn")]
-    (if-not (.isFile file)
-      {}
-      (let [lint-as (some-> (read-first-form file) :form (get :lint-as))]
-        (if (map? lint-as) lint-as {})))))
+   unreadable file, a file over the config-byte cap (default 1 MiB), or a
+   `:lint-as` that is not a map, gives {}. Nothing is evaluated."
+  ([root] (read-lint-as root default-max-config-bytes))
+  ([root max-config-bytes]
+   (:lint-as (read-lint-as* root max-config-bytes))))
 
 ;; @spec MCP-OP-QUERY-009
 (defn discover
   "Discover the source files of the workspace at `root`.
 
    `root` is an absolute directory. `opts` is the bounds map; this function
-   uses `:max-files` and `:max-file-bytes`. Returns
+   uses `:max-files`, `:max-file-bytes`, `:max-config-bytes` (default 1 MiB, for
+   a build file and the kondo config) and `:expired?`, a zero-argument function
+   that discovery calls before each build file and each source file; when it
+   returns true, discovery throws `:timeout`. Returns
    `{:files [{:path :abs :mtime :size}] :skipped [...] :read-complete? bool
      :lint-as {sym sym}}`. Throws `:invalid-workspace-root` when `root` is not an
    existing directory."
@@ -254,12 +301,21 @@
                       {:error-type :invalid-workspace-root :root root})))
     (let [max-files      (or (:max-files opts) default-max-files)
           max-file-bytes (or (:max-file-bytes opts) default-max-file-bytes)
-          dirs           (source-roots root-real (.toFile root-real))
-          {:keys [files skipped]} (walk-sources root-real dirs max-files max-file-bytes)]
+          max-config     (or (:max-config-bytes opts) default-max-config-bytes)
+          expired?       (:expired? opts)
+          {:keys [dirs] build-skipped :skipped}
+          (source-roots root-real (.toFile root-real) max-config expired?)
+          {:keys [files] walk-skipped :skipped}
+          (walk-sources root-real dirs max-files max-file-bytes expired?)
+          {:keys [lint-as] config-skipped :skipped}
+          (read-lint-as* (str root-real) max-config)
+          skipped        (-> (vec build-skipped)
+                             (into config-skipped)
+                             (into walk-skipped))]
       {:files          files
        :skipped        skipped
        :read-complete? (empty? skipped)
-       :lint-as        (read-lint-as (str root-real))})))
+       :lint-as        lint-as})))
 
 ;; @spec MCP-OP-QUERY-017
 (defn sha256

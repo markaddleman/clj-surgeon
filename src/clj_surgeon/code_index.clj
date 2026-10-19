@@ -24,7 +24,18 @@
    :idle-ms 7200000
    :max-defs 64
    :max-error-chars 1000
-   :pool-size 4})
+   :pool-size 4
+   ;; fix round 1 (docs/intent/code-index/code-index-api.md, bounds map)
+   :refresh-timeout-ms 60000
+   :stop-grace-ms 1000
+   :max-live-workers 2
+   :max-pull-nodes 2000
+   :max-def-items 100000
+   :max-total-bytes 134217728
+   :max-config-bytes 1048576
+   :max-nearest-chars 64
+   ;; fix round 1b (MCP-OP-QUERY-124)
+   :max-expression-depth 256})
 
 ;; @spec MCP-OP-QUERY-025
 (def empty-index
@@ -42,13 +53,6 @@
 ;; ---------------------------------------------------------------------------
 ;; apply-ingest
 ;; ---------------------------------------------------------------------------
-
-(defn- smaller-path-wins
-  "Choose between two records of one qname or namespace by their :file."
-  [old new]
-  (if (and old (neg? (compare (:file old) (:file new))))
-    old
-    new))
 
 (defn- file-entry
   "The index entry of a file result: its stat facts, namespace, var qnames and uses."
@@ -74,7 +78,8 @@
         (update :files dissoc path)
         (update :vars (fn [vars]
                         (reduce (fn [m q]
-                                  (if (= path (:file (get m q))) (dissoc m q) m))
+                                  (let [kept (vec (remove #(= path (:file %)) (get m q)))]
+                                    (if (empty? kept) (dissoc m q) (assoc m q kept))))
                                 vars
                                 (:vars entry))))
         (update :namespaces (fn [nss]
@@ -83,21 +88,49 @@
                                 nss))))
     index))
 
+(defn- platform-rank
+  "Order of the platform versions of one var: `:clj` and `:cljc` before `:cljs`."
+  [record]
+  (if (= :cljs (:platform record)) 1 0))
+
+;; @spec MCP-OP-QUERY-099
 (defn- add-file
-  "Add a file result. A qname or namespace that another file holds goes to the smaller path."
+  "Add a file result. Each qname gets its version records, `:clj` before
+   `:cljs`. No other file holds the namespace (see `resolve-duplicates`)."
   [index file-result]
   (let [path (:path file-result)
-        own-vars (reduce (fn [m v] (if (contains? m (:qname v)) m (assoc m (:qname v) v)))
-                         {}
-                         (:vars file-result))
-        ns-rec (namespace-entry file-result)]
+        versions (->> (:vars file-result)
+                      (group-by :qname)
+                      (into {} (map (fn [[q rs]] [q (vec (sort-by platform-rank rs))]))))]
     (-> index
         (assoc-in [:files path] (file-entry file-result))
-        (update :vars (fn [vars]
-                        (reduce-kv (fn [m q v] (update m q smaller-path-wins v))
-                                   vars
-                                   own-vars)))
-        (update :namespaces update (:ns file-result) smaller-path-wins ns-rec))))
+        (update :vars into versions)
+        (assoc-in [:namespaces (:ns file-result)] (namespace-entry file-result)))))
+
+;; @spec MCP-OP-QUERY-101
+(defn- resolve-duplicates
+  "Decide which file indexes each namespace. Of all the files that claim one
+   namespace (the upserted ones and the indexed one), the smaller path wins.
+   Returns `{:winners [file-result ...] :evict [path ...] :duplicates [skipped ...]}`.
+   `index` is the index after the removal of the paths that the ingest replaces."
+  [index upsert]
+  (let [claims (group-by :ns upsert)
+        decide (fn [[ns-name results]]
+                 (let [owner (get-in index [:namespaces ns-name :file])
+                       paths (cond-> (set (map :path results)) owner (conj owner))
+                       winner (first (sort paths))]
+                   {:winners (filter #(= winner (:path %)) results)
+                    :evict (when (and owner (not= owner winner)) [owner])
+                    :duplicates (concat
+                                 (for [r results :when (not= winner (:path r))]
+                                   {:file (:path r) :reason :duplicate-namespace :size (:size r)})
+                                 (when (and owner (not= owner winner))
+                                   [{:file owner :reason :duplicate-namespace
+                                     :size (get-in index [:files owner :size])}]))}))
+        decisions (map decide (sort-by key claims))]
+    {:winners (vec (mapcat :winners decisions))
+     :evict (vec (mapcat :evict decisions))
+     :duplicates (vec (sort-by :file (mapcat :duplicates decisions)))}))
 
 (defn- use-sort-key
   "Sort key of a use: file, line, from (nil first), kind name."
@@ -112,7 +145,7 @@
 (defn- rebuild-derived
   "Rebuild :callers, :kw-users and :uses-by-target from the vars and file uses."
   [index]
-  (let [vars (vals (:vars index))]
+  (let [vars (mapcat identity (vals (:vars index)))]
     (assoc index
            :callers (reduce (fn [m v] (add-reverse m (:qname v) (:calls v))) {} vars)
            :kw-users (reduce (fn [m v] (add-reverse m (:qname v) (:uses-kw v))) {} vars)
@@ -138,11 +171,45 @@
         stripped (reduce remove-path
                          index
                          (concat (:remove ingest) upserted))
-        merged (reduce add-file stripped upsert)
-        result (cond-> (rebuild-derived merged)
-                 (contains? ingest :skipped) (assoc :skipped (vec (:skipped ingest)))
+        {:keys [winners evict duplicates]} (resolve-duplicates stripped upsert)
+        cleared (reduce remove-path stripped evict)
+        merged (reduce add-file cleared winners)
+        dup-files (set (map :file duplicates))
+        gone (into upserted (:remove ingest))
+        base (vec (if (contains? ingest :skipped)
+                    (:skipped ingest)
+                    (remove #(and (= :duplicate-namespace (:reason %))
+                                  (contains? gone (:file %)))
+                            (:skipped index))))
+        skipped (into (vec (remove #(and (= :duplicate-namespace (:reason %))
+                                         (contains? dup-files (:file %)))
+                                   base))
+                      duplicates)
+        result (cond-> (assoc (rebuild-derived merged) :skipped skipped)
                  (contains? ingest :built-ms) (assoc :built-ms (:built-ms ingest)))]
-    (assoc result :read-complete? (empty? (:skipped result)))))
+    (assoc result :read-complete? (empty? skipped))))
+
+;; @spec MCP-OP-QUERY-119
+(defn plan-reads
+  "Split the files to read by the total-byte cap. `files` holds
+   `{:path :size}` maps. The files are taken in order of path and read while
+   the bytes taken so far are below `max-total-bytes`; a file that reaches the
+   cap is read, and each later file is skipped with the reason `:total-bytes`.
+   Returns `{:read [path ...] :skipped [{:file :reason :size} ...]}`, both in
+   order of path."
+  [files max-total-bytes]
+  (let [{:keys [read skipped]}
+        (reduce (fn [{:keys [total] :as acc} {:keys [path size]}]
+                  (if (< total max-total-bytes)
+                    (-> acc
+                        (update :read conj path)
+                        (assoc :total (+ total (or size 0))))
+                    (update acc :skipped conj
+                            (cond-> {:file path :reason :total-bytes}
+                              size (assoc :size size)))))
+                {:total 0 :read [] :skipped []}
+                (sort-by :path files))]
+    {:read read :skipped skipped}))
 
 ;; ---------------------------------------------------------------------------
 ;; stale-plan

@@ -544,3 +544,132 @@
     (is (= 20 (:chars result)))
     (is (= "(0 1 2 3 4 5 6 7 8 9" (:text result)))
     (is (< @realized 100))))
+
+;; --- 097 (decision C17) ---
+
+;; @spec MCP-OP-QUERY-097
+(deftest render-of-a-pull-names-the-var-a-cycle-returns-to-and-the-var-that-closes-it
+  (is (= (str "a.b/f\n"
+              "  calls:\n"
+              "    c.d.e/h\n"
+              "      calls:\n"
+              "        a.b/f cycle: returns to a.b/f (closed by c.d.e/h)")
+         (r/render (pull-result
+                    {:var/qname "a.b/f"
+                     :var/calls [{:var/qname "c.d.e/h"
+                                  :var/calls [{:var/qname "a.b/f" :pull/cycle-to "a.b/f"}]}]})))))
+
+;; @spec MCP-OP-QUERY-097
+(deftest render-of-a-pull-never-writes-a-cycle-map-as-a-plain-id
+  (testing "a join of cycle maps only"
+    (is (= (str "c/b\n"
+                "  calls:\n"
+                "    c/b cycle: returns to c/b (closed by c/b)")
+           (r/render (pull-result {:var/qname "c/b"
+                                   :var/calls [{:var/qname "c/b" :pull/cycle-to "c/b"}]})))))
+  (testing "a join that mixes a cycle map with ids"
+    (is (= (str "c/a\n"
+                "  calls:\n"
+                "    c/x\n"
+                "    c/y cycle: returns to c/y (closed by c/a)")
+           (r/render (pull-result {:var/qname "c/a"
+                                   :var/calls [{:var/qname "c/x"}
+                                               {:var/qname "c/y" :pull/cycle-to "c/y"}]})))))
+  (testing "a reverse join"
+    (is (= (str "a.b/f\n"
+                "  called by:\n"
+                "    c.d.e/h\n"
+                "      called by:\n"
+                "        a.b/f cycle: returns to a.b/f (closed by c.d.e/h)")
+           (r/render (pull-result
+                      {:var/qname "a.b/f"
+                       :var/_calls [{:var/qname "c.d.e/h"
+                                     :var/_calls [{:var/qname "a.b/f" :pull/cycle-to "a.b/f"}]}]}))))))
+
+;; --- 085, 118 (issue #10) ---
+
+(defn- counted
+  "An unchunked endless lazy seq of `(f i)` that counts the cells it realizes
+   in `realized`."
+  [realized f]
+  (letfn [(from [i]
+            (lazy-seq
+             (swap! realized inc)
+             (cons (f i) (from (inc i)))))]
+    (from 0)))
+
+(defn- use-map [i] {:kind :use :file "f" :line i :ns "a" :from "b" :use-kind :call})
+(defn- form-at [i] {:kind :form :qname (str "a/f" i) :file "f" :start i :end i :source "(x)"})
+(defn- ns-at [i] {:kind :ns :ns (str "n" i) :vars i})
+
+(defn- valve
+  "An interrupt fn that fails a test instead of hanging it."
+  []
+  (let [n (atom 0)]
+    (fn [] (when (> (swap! n inc) 2000000)
+             (throw (ex-info "valve" {:error-type :valve}))))))
+
+;; @spec MCP-OP-QUERY-085
+;; @spec MCP-OP-QUERY-118
+(deftest render-bounded-never-realizes-a-sequence-of-any-kind-past-the-limit
+  (doseq [[label f wrap] [["use" use-map identity]
+                          ["var" (fn [i] (assoc var-f :name (str "f" i))) identity]
+                          ["form" form-at identity]
+                          ["ns" ns-at identity]
+                          ["skeleton" (fn [i] (assoc var-f :name (str "f" i)))
+                           #(with-meta % skeleton-meta)]
+                          ["pull" (fn [i] (pull-result {:var/qname (str "a/f" i)})) identity]]]
+    (let [realized (atom 0)
+          limit 100
+          result (r/render-bounded (wrap (counted realized f)) limit (valve))]
+      (is (true? (:over-limit? result)) label)
+      (is (= limit (:chars result)) label)
+      (is (<= @realized (inc limit)) (str label " realized " @realized)))))
+
+;; @spec MCP-OP-QUERY-118
+(deftest render-bounded-of-a-long-finite-sequence-realizes-limit-plus-one-elements
+  (let [realized (atom 0)
+        xs (take 4000000 (counted realized use-map))
+        result (r/render-bounded xs 500 (valve))]
+    (is (true? (:over-limit? result)))
+    (is (<= @realized 501))))
+
+;; @spec MCP-OP-QUERY-118
+(deftest render-bounded-decides-the-kind-from-the-realized-elements
+  (let [realized (atom 0)
+        mixed (cons var-f (counted realized (fn [_] "text")))
+        result (r/render-bounded mixed 60 (valve))]
+    (is (true? (:over-limit? result)))
+    (is (str/starts-with? (:text result) "({"))
+    (is (<= @realized 61))))
+
+;; @spec MCP-OP-QUERY-085
+(deftest render-bounded-text-of-a-streamed-sequence-is-a-prefix-of-the-full-rendering
+  (doseq [value [(mapv use-map (range 30))
+                 (mapv form-at (range 30))
+                 (mapv ns-at (range 30))
+                 (with-meta (mapv (fn [i] (assoc var-f :name (str "f" i))) (range 30)) skeleton-meta)
+                 (mapv (fn [i] (pull-result {:var/qname (str "a/f" i)})) (range 30))]]
+    (let [full (r/render value)]
+      (doseq [limit [0 1 17 (dec (count full)) (count full) (inc (count full))]]
+        (let [result (r/render-bounded value limit)]
+          (is (= (subs full 0 (min limit (count full))) (:text result)))
+          (is (= (> (count full) limit) (:over-limit? result))))))))
+
+;; @spec MCP-OP-QUERY-107
+(deftest render-bounded-polls-the-interrupt-fn-for-each-element
+  (let [calls (atom 0)
+        d (try (r/render-bounded (map use-map (range)) 100000
+                                 (fn [] (when (> (swap! calls inc) 50)
+                                          (throw (ex-info "stop" {:error-type :timeout})))))
+               (catch clojure.lang.ExceptionInfo e (ex-data e)))]
+    (is (= :timeout (:error-type d)))
+    (is (= 51 @calls))))
+
+;; @spec MCP-OP-QUERY-107
+(deftest render-bounded-stops-on-the-thread-interrupt-flag-when-it-has-no-interrupt-fn
+  (let [d (try (.interrupt (Thread/currentThread))
+               (r/render-bounded (map use-map (range 1000)) 100000)
+               (catch clojure.lang.ExceptionInfo e (ex-data e))
+               (finally (Thread/interrupted)))]
+    (is (= :timeout (:error-type d)))))

@@ -196,6 +196,54 @@
                         "(-> (form 'data) (match 'unknown-function))"]]
       (is (map? (dsl/compile-xray expression)) expression))))
 
+;; Probe class: a class outside every :classes allowlist whose static
+;; initializer sets a system property. Loading it with initialization is the
+;; observable effect of the SCI string-hint escape.
+(defn- define-probe-class!
+  "Define a class named `class-name` whose static initializer sets the system
+   property `prop` to \"initialized\". Defining does not initialize it."
+  [^String class-name ^String prop]
+  (let [cw (clojure.asm.ClassWriter. clojure.asm.ClassWriter/COMPUTE_MAXS)
+        internal (.replace class-name \. \/)]
+    (.visit cw clojure.asm.Opcodes/V1_8 clojure.asm.Opcodes/ACC_PUBLIC internal nil "java/lang/Object" nil)
+    (let [mv (.visitMethod cw clojure.asm.Opcodes/ACC_STATIC "<clinit>" "()V" nil nil)]
+      (.visitCode mv)
+      (.visitLdcInsn mv prop)
+      (.visitLdcInsn mv "initialized")
+      (.visitMethodInsn mv clojure.asm.Opcodes/INVOKESTATIC "java/lang/System" "setProperty"
+                        "(Ljava/lang/String;Ljava/lang/String;)Ljava/lang/String;")
+      (.visitInsn mv clojure.asm.Opcodes/POP)
+      (.visitInsn mv clojure.asm.Opcodes/RETURN)
+      (.visitMaxs mv 0 0)
+      (.visitEnd mv))
+    (.visitEnd cw)
+    (.defineClass (clojure.lang.DynamicClassLoader.) class-name (.toByteArray cw) nil)))
+
+;; @spec DATACODE-SCI-001
+(deftest string-type-hint-cannot-load-a-class-outside-the-allowlist
+  ;; SCI 0.13.53 fixed a sandbox escape: a string type hint on a symbol
+  ;; argument of an instance method call loaded and statically initialized any
+  ;; class, whatever :classes allowed. Symbol admission already refuses
+  ;; interop heads, so this test removes admission and checks that SCI alone,
+  ;; as the capability fence, still refuses to load the class.
+  (let [id (str (random-uuid))
+        class-name (str "clj_surgeon.probe.XrayEscape" (str/replace id "-" ""))
+        prop (str "clj-surgeon.probe." id)
+        expression (str "(let [s \"abc\" v 1] (.indexOf s ^\"" class-name "\" v))")]
+    (define-probe-class! class-name prop)
+    (try
+      (is (nil? (System/getProperty prop)) "the probe class starts uninitialized")
+      (is (= :disallowed-symbol
+             (:reason (try (dsl/compile-xray expression)
+                           (catch Exception e (ex-data e)))))
+          "the public fence refuses the interop head before evaluation")
+      (is (nil? (System/getProperty prop)))
+      (with-redefs-fn {(ns-resolve 'clj-surgeon.edit-dsl 'sandbox-admission) (fn [_] nil)}
+        #(try (dsl/compile-xray expression) (catch Exception _ nil)))
+      (is (nil? (System/getProperty prop))
+          "a string hint must not load a class outside the :classes allowlist")
+      (finally (System/clearProperty prop)))))
+
 (deftest quoted-macro-expansion-symbols-remain-searchable-structural-data
   ;; Regression from the 2026-08-04 X-ray maximality review: the source guard
   ;; walked through (quote ...), so `(match 'loop)` was refused before file I/O.

@@ -54,8 +54,8 @@
             :uses (:uses fx/c-d-e-file)}
            (get-in idx [:files c-d-e-path])))
     (is (= #{"a.b/f" "a.b/g" "c.d.e/h" "a.b-test/t"} (set (keys (:vars idx)))))
-    (is (= (first (:vars fx/a-b-file)) (get-in idx [:vars "a.b/f"])))
-    (is (= (second (:vars fx/a-b-file)) (get-in idx [:vars "a.b/g"])))))
+    (is (= [(first (:vars fx/a-b-file))] (get-in idx [:vars "a.b/f"])))
+    (is (= [(second (:vars fx/a-b-file))] (get-in idx [:vars "a.b/g"])))))
 
 ;; @spec MCP-OP-QUERY-026
 (deftest apply-ingest-records-one-namespace-entry-per-file
@@ -163,20 +163,89 @@
                              {:remove [c-d-e-path] :upsert [fx/c-d-e-file]})]
     (is (= (full-index) idx))))
 
-;; @spec MCP-OP-QUERY-027
-(deftest apply-ingest-lets-the-smaller-path-win-for-a-qname-defined-twice
-  (let [lib-var (assoc (first (:vars fx/a-b-file))
-                       :file "lib/a/b.clj" :source "(defn f [x] :lib)")
-        lib-file (assoc fx/a-b-file
-                        :path "lib/a/b.clj"
-                        :vars [lib-var]
-                        :uses [])
-        expected-winner lib-var]
+;; @spec MCP-OP-QUERY-101
+(deftest a-namespace-lives-in-one-file-the-smaller-path-is-indexed
+  ;; The "smaller path wins" rule for one qname is gone (decision C1). A
+  ;; namespace in two files keeps the smaller path; the other file is skipped.
+  (let [lib-var (assoc (first (:vars fx/a-b-file)) :file "lib/a/b.clj")
+        lib-file (assoc fx/a-b-file :path "lib/a/b.clj" :size 77
+                        :vars [lib-var] :uses [])]
     (testing "ingest order does not matter"
       (doseq [order [[fx/a-b-file lib-file] [lib-file fx/a-b-file]]]
         (let [idx (ci/apply-ingest ci/empty-index {:upsert order})]
-          (is (= expected-winner (get-in idx [:vars "a.b/f"])))
-          (is (= "lib/a/b.clj" (get-in idx [:namespaces "a.b" :file]))))))))
+          (is (= [lib-var] (get-in idx [:vars "a.b/f"])))
+          (is (= "lib/a/b.clj" (get-in idx [:namespaces "a.b" :file])))
+          (is (= #{"lib/a/b.clj"} (set (keys (:files idx)))))
+          (is (= [{:file a-b-path :reason :duplicate-namespace :size 233}]
+                 (:skipped idx)))
+          (is (false? (:read-complete? idx))))))
+    (testing "a file that arrives later with a smaller path evicts the indexed file"
+      (let [base (ci/apply-ingest ci/empty-index {:upsert [fx/a-b-file]})
+            idx (ci/apply-ingest base {:upsert [lib-file]})]
+        (is (= #{"lib/a/b.clj"} (set (keys (:files idx)))))
+        (is (= [{:file a-b-path :reason :duplicate-namespace :size 233}]
+               (:skipped idx)))))
+    (testing "a skipped list given by the caller keeps its entries and gains the duplicate"
+      (let [given {:file "x.clj" :reason :unstable :size 1}
+            idx (ci/apply-ingest ci/empty-index
+                                 {:upsert [fx/a-b-file lib-file] :skipped [given]})]
+        (is (= [given {:file a-b-path :reason :duplicate-namespace :size 233}]
+               (:skipped idx)))))))
+
+;; @spec MCP-OP-QUERY-100
+(deftest a-var-with-two-platform-versions-keeps-both-records-clj-first
+  (let [clj-v (assoc (first (:vars fx/c-d-e-file))
+                     :platform :clj :arglists ["[x]"] :file "src/c/d/e.cljc")
+        cljs-v (assoc clj-v :platform :cljs :arglists ["[x y]"] :start 5 :end 5)
+        cljc-file (assoc fx/c-d-e-file :path "src/c/d/e.cljc" :vars [clj-v cljs-v])]
+    (testing "both orders of the version records give the same vector"
+      (doseq [vs [[clj-v cljs-v] [cljs-v clj-v]]]
+        (let [idx (ci/apply-ingest ci/empty-index {:upsert [(assoc cljc-file :vars vs)]})]
+          (is (= [clj-v cljs-v] (get-in idx [:vars "c.d.e/h"])))
+          (is (= ["c.d.e/h"] (get-in idx [:files "src/c/d/e.cljc" :vars]))
+              "the file entry lists the qname once"))))
+    (testing "removing the file removes both records"
+      (let [idx (ci/apply-ingest ci/empty-index {:upsert [cljc-file]})
+            gone (ci/apply-ingest idx {:remove ["src/c/d/e.cljc"]})]
+        (is (= {} (:vars gone)))
+        (is (= {} (:namespaces gone)))))
+    (testing "a replaced file drops the versions it no longer has"
+      (let [idx (ci/apply-ingest ci/empty-index {:upsert [cljc-file]})
+            one (ci/apply-ingest idx {:upsert [(assoc cljc-file :vars [(assoc clj-v :platform :cljc)])]})]
+        (is (= [(assoc clj-v :platform :cljc)] (get-in one [:vars "c.d.e/h"])))))))
+
+;; @spec MCP-OP-QUERY-119
+(deftest plan-reads-stops-when-the-bytes-read-reach-the-total-cap
+  (let [files [{:path "src/c.clj" :size 40}
+               {:path "src/a.clj" :size 60}
+               {:path "src/b.clj" :size 30}
+               {:path "src/d.clj" :size 10}]]
+    (testing "files are taken in order of path; the file that reaches the cap is read"
+      (is (= {:read ["src/a.clj" "src/b.clj"]
+              :skipped [{:file "src/c.clj" :reason :total-bytes :size 40}
+                        {:file "src/d.clj" :reason :total-bytes :size 10}]}
+             (ci/plan-reads files 70))))
+    (testing "a total below the cap reads every file"
+      (is (= {:read ["src/a.clj" "src/b.clj" "src/c.clj" "src/d.clj"] :skipped []}
+             (ci/plan-reads files 1000))))
+    (testing "the bytes read reach the cap exactly, so the next file is skipped"
+      (is (= {:read ["src/a.clj" "src/b.clj"]
+              :skipped [{:file "src/c.clj" :reason :total-bytes :size 40}
+                        {:file "src/d.clj" :reason :total-bytes :size 10}]}
+             (ci/plan-reads files 90))))
+    (testing "no file at all"
+      (is (= {:read [] :skipped []} (ci/plan-reads [] 10))))))
+
+;; @spec MCP-OP-QUERY-119
+;; @spec MCP-OP-QUERY-120
+(deftest default-bounds-hold-the-ingest-bounds
+  (is (= 134217728 (:max-total-bytes ci/default-bounds)))
+  (is (= 1048576 (:max-config-bytes ci/default-bounds)))
+  (is (= 60000 (:refresh-timeout-ms ci/default-bounds))))
+
+;; @spec MCP-OP-QUERY-124
+(deftest default-bounds-hold-the-expression-depth-cap
+  (is (= 256 (:max-expression-depth ci/default-bounds))))
 
 ;; @spec MCP-OP-QUERY-028
 (deftest apply-ingest-gives-the-same-index-for-every-upsert-order

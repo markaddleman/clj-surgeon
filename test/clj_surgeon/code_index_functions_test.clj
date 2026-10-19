@@ -42,11 +42,11 @@
 ;; --- 036 ---
 
 ;; @spec MCP-OP-QUERY-036
-(deftest bound-symbols-are-exactly-the-six-functions-in-order
-  (is (= '[namespaces skeleton form refs pull help] (fns/bound-symbols))))
+(deftest bound-symbols-are-exactly-the-seven-functions-in-order
+  (is (= '[search namespaces skeleton form refs pull help] (fns/bound-symbols))))
 
 ;; @spec MCP-OP-QUERY-036
-(deftest bindings-hold-exactly-the-six-bound-symbols-as-functions
+(deftest bindings-hold-exactly-the-seven-bound-symbols-as-functions
   (let [b (fns/bindings idx (atom #{}))]
     (is (= (set (fns/bound-symbols)) (set (keys b))))
     (is (every? ifn? (vals b)))))
@@ -65,7 +65,7 @@
     (is (plain-data? (fns/help))))
   (testing "no result is the index or a var record of it"
     (is (not-any? #(identical? % idx) (fns/namespaces idx)))
-    (let [records (set (vals (:vars idx)))]
+    (let [records (set (mapcat identity (vals (:vars idx))))]
       (is (not-any? #(contains? records %) (fns/skeleton idx 'a.b)))
       (is (not-any? #(contains? records %) (fns/form idx ['a.b/f]))))))
 
@@ -97,11 +97,11 @@
 (deftest skeleton-returns-exact-var-maps-in-start-order-with-metadata
   (let [sk (fns/skeleton idx 'a.b)]
     (is (vector? sk))
-    (is (= [{:kind :var :qname "a.b/f" :ns "a.b" :name "f" :file "src/a/b.clj"
+    (is (= [{:kind :var :qname "a.b/f" :ns "a.b" :name "f" :platform :clj :file "src/a/b.clj"
              :start 4 :end 7 :arglists ["[x]" "[x y]"] :private? false
              :calls ["a.b/g" "c.d.e/h"] :fx ["swap!"] :throws? false
              :intent "Does f."}
-            {:kind :var :qname "a.b/g" :ns "a.b" :name "g" :file "src/a/b.clj"
+            {:kind :var :qname "a.b/g" :ns "a.b" :name "g" :platform :clj :file "src/a/b.clj"
              :start 9 :end 12 :arglists ["[x y]"] :private? true
              :calls ["z.external/q"] :fx [] :throws? true}]
            sk))
@@ -110,7 +110,7 @@
 ;; @spec MCP-OP-QUERY-039
 (deftest skeleton-accepts-a-string-and-leaves-the-doc-out-when-there-is-none
   (let [sk (fns/skeleton idx "a.b-test")]
-    (is (= [{:kind :var :qname "a.b-test/t" :ns "a.b-test" :name "t"
+    (is (= [{:kind :var :qname "a.b-test/t" :ns "a.b-test" :name "t" :platform :clj
              :file "test/a/b_test.clj" :start 4 :end 4 :arglists ["[]"]
              :private? false :calls ["a.b/f"] :fx [] :throws? false}]
            sk))
@@ -118,10 +118,10 @@
 
 ;; @spec MCP-OP-QUERY-040
 (deftest skeleton-var-map-has-no-source-and-no-doc-keys
-  (is (= #{:kind :qname :ns :name :file :start :end :arglists :private? :calls :fx
+  (is (= #{:kind :qname :ns :name :platform :file :start :end :arglists :private? :calls :fx
            :throws? :intent}
          (set (keys (first (fns/skeleton idx 'a.b))))))
-  (is (= #{:kind :qname :ns :name :file :start :end :arglists :private? :calls :fx
+  (is (= #{:kind :qname :ns :name :platform :file :start :end :arglists :private? :calls :fx
            :throws?}
          (set (keys (second (fns/skeleton idx 'a.b)))))))
 
@@ -133,7 +133,7 @@
 
 ;; @spec MCP-OP-QUERY-042
 (deftest form-returns-one-map-for-a-single-symbol
-  (is (= [{:kind :form :qname "c.d.e/h" :file "src/c/d/e.clj" :start 3 :end 3
+  (is (= [{:kind :form :qname "c.d.e/h" :platform :clj :file "src/c/d/e.clj" :start 3 :end 3
            :source "(defn h [x] (a.b/f x))"}]
          (fns/form idx 'c.d.e/h))))
 
@@ -141,8 +141,8 @@
 (deftest form-returns-maps-in-the-order-given-for-symbols-and-strings
   (let [r (fns/form idx ["c.d.e/h" 'a.b/g])]
     (is (= ["c.d.e/h" "a.b/g"] (mapv :qname r)))
-    (is (= {:kind :form :qname "a.b/g" :file "src/a/b.clj" :start 9 :end 12
-            :source (:source (get (:vars idx) "a.b/g"))}
+    (is (= {:kind :form :qname "a.b/g" :platform :clj :file "src/a/b.clj" :start 9 :end 12
+            :source (:source (first (get (:vars idx) "a.b/g")))}
            (second r)))
     (is (= "(defn- g\n  [x y]\n  (when (nil? x) (throw (ex-info \"bad\" {:scope y :x/k 1})))\n  (z.external/q x))"
            (:source (second r))))))
@@ -199,9 +199,9 @@
 ;; --- 046 ---
 
 ;; @spec MCP-OP-QUERY-046
-(deftest help-lists-six-blocks-in-bound-symbol-order
+(deftest help-lists-seven-blocks-in-bound-symbol-order
   (let [blocks (help-blocks)]
-    (is (= 6 (count blocks)))
+    (is (= 7 (count blocks)))
     (is (= (map str (fns/bound-symbols))
            (map #(second (re-find #"^\((\S+)" %)) blocks)))
     (doseq [b blocks]
@@ -211,14 +211,14 @@
 ;; @spec MCP-OP-QUERY-046
 (deftest help-with-a-name-returns-that-block-only
   (let [blocks (help-blocks)
-        form-block (nth blocks 2)]
+        form-block (nth blocks 3)]
     (is (= form-block (fns/help 'form)))
     (is (= form-block (fns/help "form")))
-    (is (= (nth blocks 4) (fns/help 'pull)))))
+    (is (= (nth blocks 5) (fns/help 'pull)))))
 
 ;; @spec MCP-OP-QUERY-046
 (deftest help-of-an-unknown-name-returns-a-string-without-throwing
-  (is (= "no such function: bogus. Functions: namespaces, skeleton, form, refs, pull, help"
+  (is (= "no such function: bogus. Functions: search, namespaces, skeleton, form, refs, pull, help"
          (fns/help 'bogus))))
 
 ;; --- 047 ---
@@ -374,7 +374,8 @@
 (deftest pull-numeric-recursion-works-on-reverse-joins
   (is (= {:var/qname "a.b/f"
           :var/_calls [{:var/qname "a.b-test/t"}
-                       {:var/qname "c.d.e/h" :var/_calls [{:var/qname "a.b/f"}]}]}
+                       {:var/qname "c.d.e/h"
+                        :var/_calls [{:var/qname "a.b/f" :pull/cycle-to "a.b/f"}]}]}
          (pull/pull idx [:var/qname {:var/_calls 2}] [:var/qname "a.b/f"]))))
 
 ;; @spec MCP-OP-QUERY-050
@@ -420,7 +421,7 @@
           :var/calls [{:var/qname "a.b/g"
                        :var/calls [{:var/qname "z.external/q" :var/external? true}]}
                       {:var/qname "c.d.e/h"
-                       :var/calls [{:var/qname "a.b/f"}]}]}
+                       :var/calls [{:var/qname "a.b/f" :pull/cycle-to "a.b/f"}]}]}
          (pull/pull idx [:var/qname {:var/calls 3}] [:var/qname "a.b/f"]))))
 
 ;; @spec MCP-OP-QUERY-052
@@ -428,17 +429,167 @@
   (let [r (pull/pull idx [:var/qname :var/private? {:var/calls 2}] [:var/qname "a.b/f"])
         h (second (:var/calls r))]
     (is (= "c.d.e/h" (:var/qname h)))
-    (is (= [{:var/qname "a.b/f"}] (:var/calls h)))))
+    (is (= [{:var/qname "a.b/f" :pull/cycle-to "a.b/f"}] (:var/calls h)))))
 
 ;; @spec MCP-OP-QUERY-052
-(deftest pull-cut-applies-to-recursive-joins-only
-  (testing "a plain join back to the root is fully expanded"
-    (is (= {:var/qname "a.b/f"
-            :var/calls [{:var/qname "a.b/g"
-                         :var/calls [{:var/qname "z.external/q" :var/external? true}]}
-                        {:var/qname "c.d.e/h" :var/calls [{:var/qname "a.b/f" :var/private? false}]}]}
-           (pull/pull idx [:var/qname {:var/calls [:var/qname {:var/calls [:var/qname :var/private?]}]}]
-                      [:var/qname "a.b/f"])))))
+;; @spec MCP-OP-QUERY-096
+(deftest pull-cuts-a-cycle-through-an-explicit-join-too
+  ;; Changed in fix round 1 (issue #8): the path check applies to every join.
+  (is (= {:var/qname "a.b/f"
+          :var/calls [{:var/qname "a.b/g"
+                       :var/calls [{:var/qname "z.external/q" :var/external? true}]}
+                      {:var/qname "c.d.e/h"
+                       :var/calls [{:var/qname "a.b/f" :pull/cycle-to "a.b/f"}]}]}
+         (pull/pull idx [:var/qname {:var/calls [:var/qname {:var/calls [:var/qname :var/private?]}]}]
+                    [:var/qname "a.b/f"]))))
+
+;; @spec MCP-OP-QUERY-052
+;; @spec MCP-OP-QUERY-096
+(deftest pull-marks-a-cycle-with-the-var-it-returns-to
+  (testing "the map holds the id and the cycle key, whatever the sub-pattern asks"
+    (let [r (pull/pull idx [:var/qname :var/private? {:var/calls [:var/name :var/private?
+                                                                 {:var/calls [:var/name :var/private?]}]}]
+                       [:var/qname "a.b/f"])
+          h (second (:var/calls r))]
+      (is (= [{:var/qname "a.b/f" :pull/cycle-to "a.b/f"}] (:var/calls h)))))
+  (testing "a var that calls itself closes a cycle on the root"
+    (let [self {:vars {"s/loop" {:qname "s/loop" :calls ["s/loop"]}}
+                :namespaces {} :callers {} :uses-by-target {}}]
+      (is (= {:var/qname "s/loop"
+              :var/calls [{:var/qname "s/loop" :pull/cycle-to "s/loop"}]}
+             (pull/pull self [:var/qname {:var/calls [:var/qname]}] [:var/qname "s/loop"])))))
+  (testing "a cycle that does not pass the root names the var it returns to"
+    (let [g {:vars {"c/a" {:qname "c/a" :calls ["c/b"]}
+                    "c/b" {:qname "c/b" :calls ["c/c"]}
+                    "c/c" {:qname "c/c" :calls ["c/b"]}}
+             :namespaces {} :callers {} :uses-by-target {}}]
+      (is (= {:var/qname "c/a"
+              :var/calls [{:var/qname "c/b"
+                           :var/calls [{:var/qname "c/c"
+                                        :var/calls [{:var/qname "c/b" :pull/cycle-to "c/b"}]}]}]}
+             (pull/pull g [:var/qname {:var/calls [:var/qname {:var/calls [:var/qname {:var/calls [:var/qname]}]}]}]
+                        [:var/qname "c/a"])))
+      (is (= {:var/qname "c/a"
+              :var/calls [{:var/qname "c/b"
+                           :var/calls [{:var/qname "c/c"
+                                        :var/calls [{:var/qname "c/b" :pull/cycle-to "c/b"}]}]}]}
+             (pull/pull g [:var/qname {:var/calls 3}] [:var/qname "c/a"]))))))
+
+;; --- 111 and 112 (issue #8) ---
+
+(defn- nest
+  "A pull pattern with `n` explicit joins, one inside the other."
+  [n]
+  (reduce (fn [inner _] [:var/qname {:var/calls inner}]) [:var/qname] (range n)))
+
+(defn- depth-of
+  [pattern]
+  ((requiring-resolve 'clj-surgeon.code-index-pull/pattern-depth) pattern))
+
+(defn- layered-index
+  "An index of `layers` layers of `width` vars. Each var calls all vars of the
+   next layer. With `wrap?` the last layer calls the first one."
+  [layers width wrap?]
+  (let [q (fn [l i] (str "g/n" l "_" i))
+        callees (fn [l] (cond
+                          (< l (dec layers)) (mapv #(q (inc l) %) (range width))
+                          wrap? (mapv #(q 0 %) (range width))
+                          :else []))]
+    {:vars (into {} (for [l (range layers) i (range width)]
+                      [(q l i) {:qname (q l i) :calls (callees l)}]))
+     :namespaces {} :callers {} :uses-by-target {}}))
+
+;; @spec MCP-OP-QUERY-111
+(deftest pattern-depth-counts-explicit-joins-as-one-and-numeric-joins-as-n
+  (is (= 0 (depth-of [:var/qname])))
+  (is (= 1 (depth-of [:var/qname {:var/calls [:var/qname]}])))
+  (is (= 3 (depth-of [:var/qname {:var/calls 3}])))
+  (is (= 3 (depth-of (nest 3))))
+  (is (= 4 (depth-of (nest 4))))
+  (is (= 3 (depth-of [{:var/calls [{:var/calls 2}]}])))
+  (is (= 4 (depth-of [{:var/calls [{:var/calls 3}]}])))
+  (testing "the greatest path wins"
+    (is (= 3 (depth-of [{:var/calls [:var/qname]} {:var/_calls [{:var/calls [{:var/calls [:var/qname]}]}]}])))))
+
+;; @spec MCP-OP-QUERY-051
+;; @spec MCP-OP-QUERY-111
+(deftest pull-refuses-nested-explicit-joins-deeper-than-three
+  (testing "three nested joins pass"
+    (is (map? (pull/pull idx (nest 3) [:var/qname "a.b/f"]))))
+  (doseq [n [4 5 6 14 150]]
+    (let [pattern (nest n)
+          d (thrown-data #(pull/pull idx pattern [:var/qname "a.b/f"]))]
+      (is (= :pull-too-deep (:error-type d)) (str n " nested joins"))
+      (is (= n (:depth d)))
+      (is (= pattern (:pattern d))))))
+
+;; @spec MCP-OP-QUERY-051
+;; @spec MCP-OP-QUERY-111
+(deftest pull-refuses-a-numeric-join-nested-in-an-explicit-join-when-the-sum-is-over-three
+  (is (map? (pull/pull idx [{:var/calls [{:var/calls 2}]}] [:var/qname "a.b/f"])))
+  (let [d (thrown-data #(pull/pull idx [{:var/calls [{:var/calls 3}]}] [:var/qname "a.b/f"]))]
+    (is (= :pull-too-deep (:error-type d)))
+    (is (= 4 (:depth d)))))
+
+;; @spec MCP-OP-QUERY-111
+(deftest pull-computes-the-depth-before-it-visits-the-index
+  (let [visited (atom 0)
+        spy (reify clojure.lang.ILookup
+              (valAt [_ _] (swap! visited inc) nil)
+              (valAt [_ _ nf] (swap! visited inc) nf))]
+    (is (= :pull-too-deep (:error-type (thrown-data #(pull/pull spy (nest 6) [:var/qname "a.b/f"])))))
+    (is (zero? @visited))))
+
+;; @spec MCP-OP-QUERY-112
+(deftest pull-refuses-a-pull-over-the-node-budget-with-result-too-large
+  (let [big (layered-index 4 20 false)
+        d (thrown-data #(pull/pull big [:var/qname {:var/calls 3}] [:var/qname "g/n0_0"]))]
+    (is (= :result-too-large (:error-type d)))
+    (is (= 2000 (:limit d)))
+    (is (= :pull-nodes (:reason d)))))
+
+;; @spec MCP-OP-QUERY-112
+(deftest pull-stops-at-the-node-budget-without-building-the-tree
+  (let [big (layered-index 4 20 false)
+        polled (atom 0)
+        d (thrown-data #(pull/pull big [:var/qname {:var/calls 3}] [:var/qname "g/n0_0"]
+                                   {:max-pull-nodes 50 :interrupt-fn (fn [] (swap! polled inc))}))]
+    (is (= :result-too-large (:error-type d)))
+    (is (= 50 (:limit d)))
+    (is (<= @polled 51) "the pull builds no entity past the budget")))
+
+;; @spec MCP-OP-QUERY-112
+(deftest pull-counts-one-node-for-each-entity-cycle-maps-included
+  (let [g (layered-index 3 2 true)
+        pattern [:var/qname {:var/calls 3}]
+        eid [:var/qname "g/n0_0"]]
+    ;; root 1 + 2 + 4 + 8 (the last 8 are layer 0: the root is a cycle map)
+    (is (map? (pull/pull g pattern eid {:max-pull-nodes 15})))
+    (is (= :result-too-large (:error-type (thrown-data #(pull/pull g pattern eid {:max-pull-nodes 14})))))))
+
+;; @spec MCP-OP-QUERY-112
+(deftest pull-refuses-a-wide-join-before-it-builds-any-child
+  (let [wide {:vars (into {"w/root" {:qname "w/root" :calls (mapv #(str "w/c" %) (range 100000))}}
+                          (for [i (range 100000)] [(str "w/c" i) {:qname (str "w/c" i)}]))
+              :namespaces {} :callers {} :uses-by-target {}}
+        d (thrown-data #(pull/pull wide [:var/qname {:var/calls [:var/qname]}] [:var/qname "w/root"]))]
+    (is (= :result-too-large (:error-type d)))))
+
+;; @spec MCP-OP-QUERY-112
+(deftest pull-within-the-budget-is-not-refused
+  (let [g (layered-index 4 6 false)
+        r (pull/pull g [:var/qname {:var/calls 3}] [:var/qname "g/n0_0"])]
+    (is (= 6 (count (:var/calls r))))))
+
+;; @spec MCP-OP-QUERY-107
+(deftest pull-polls-the-interrupt-fn-for-each-entity
+  (let [calls (atom 0)
+        g (layered-index 3 6 false)
+        d (thrown-data #(pull/pull g [:var/qname {:var/calls 3}] [:var/qname "g/n0_0"]
+                                   {:interrupt-fn (fn [] (when (> (swap! calls inc) 10)
+                                                           (throw (ex-info "t" {:error-type :timeout}))))}))]
+    (is (= :timeout (:error-type d)))
+    (is (= 11 @calls))))
 
 ;; --- 053 ---
 
@@ -552,3 +703,259 @@
     (is (= #{"src/a/b.clj" "src/c/d/e.clj"}
            (touch 'pull [:var/qname {:var/calls 2}] [:var/qname "a.b/f"])))
     (is (= #{} (touch 'help)))))
+
+;; --- C1: the platform versions of a .cljc var (099, 100) ---
+
+(defn- cljc-var
+  [name platform start end & {:as more}]
+  (merge {:qname (str "k.c/" name) :ns "k.c" :name name :platform platform
+          :file "src/k/c.cljc" :start start :end end :kind "clojure.core/defn"
+          :private? false :arglists ["[x]"] :source (str "(defn " name " [x] x)")
+          :calls [] :fx [] :uses-kw [] :reads-kw [] :throws? false}
+         more))
+
+(def ^:private cljc-file
+  "A .cljc file: `both` has a :clj and a :cljs version (the :cljs one is defined
+   first in the file), `same` has one :cljc version."
+  {:path "src/k/c.cljc" :mtime 1 :size 10 :sha256 "d" :ns "k.c"
+   :vars [(cljc-var "both" :cljs 3 3 :source "(defn both [x] (js/f x))" :calls [])
+          (cljc-var "both" :clj 5 5 :source "(defn both [x] (inc x))" :calls ["z.e/q"])
+          (cljc-var "same" :cljc 7 7)]
+   :uses []})
+
+(def ^:private cljc-idx
+  (code-index/apply-ingest code-index/empty-index {:upsert [cljc-file]}))
+
+;; @spec MCP-OP-QUERY-039
+;; @spec MCP-OP-QUERY-100
+(deftest skeleton-returns-each-platform-version-of-a-var-with-the-clj-version-first
+  (let [sk (fns/skeleton cljc-idx 'k.c)]
+    (is (= [["k.c/both" :clj 5] ["k.c/both" :cljs 3] ["k.c/same" :cljc 7]]
+           (mapv (juxt :qname :platform :start) sk))
+        "one var map for each version; :clj before :cljs; vars in order of their start")
+    (is (= ["z.e/q"] (:calls (first sk))) "each version keeps its own analysis")
+    (is (= 2 (:vars (first (fns/namespaces cljc-idx))))
+        "namespaces counts vars, not versions")))
+
+;; @spec MCP-OP-QUERY-042
+;; @spec MCP-OP-QUERY-100
+(deftest form-returns-each-platform-version-of-a-var-with-its-own-source
+  (let [r (fns/form cljc-idx ['k.c/both 'k.c/same])]
+    (is (= [["k.c/both" :clj 5 "(defn both [x] (inc x))"]
+            ["k.c/both" :cljs 3 "(defn both [x] (js/f x))"]
+            ["k.c/same" :cljc 7 "(defn same [x] x)"]]
+           (mapv (juxt :qname :platform :start :source) r)))
+    (is (every? #(= :form (:kind %)) r))))
+
+;; @spec MCP-OP-QUERY-042
+(deftest form-refuses-a-var-that-no-version-defines
+  (is (= :unknown-var (:error-type (thrown-data #(fns/form cljc-idx 'k.c/none))))))
+
+;; @spec MCP-OP-QUERY-033
+;; @spec MCP-OP-QUERY-100
+(deftest bindings-record-the-file-of-a-var-that-has-two-versions
+  (let [touched (atom #{})
+        b (fns/bindings cljc-idx touched)]
+    ((get b 'form) 'k.c/both)
+    ((get b 'pull) [:var/qname] [:var/qname "k.c/both"])
+    (is (= #{"src/k/c.cljc"} @touched))))
+
+;; --- C1: pull follows the versions of a .cljc var (100) ---
+
+(def ^:private cljc-join-idx
+  "A .cljc file: `both` has :clj and :cljs versions, `top` is one :cljc version
+   that calls it, `twice` has a :clj and a :cljs version that each call it, and
+   `jsonly` is a :cljs version that `twice` also calls."
+  (code-index/apply-ingest
+   code-index/empty-index
+   {:upsert
+    [{:path "src/k/c.cljc" :mtime 1 :size 10 :sha256 "j" :ns "k.c"
+      :vars [(cljc-var "both" :cljs 3 3 :source "(defn both [x] (js/f x))")
+             (cljc-var "both" :clj 5 5 :source "(defn both [x] (inc x))")
+             (cljc-var "top" :cljc 7 7 :calls ["k.c/both"])
+             (cljc-var "twice" :cljs 9 9 :calls ["k.c/both" "k.c/jsonly"])
+             (cljc-var "twice" :clj 11 11 :calls ["k.c/both"])
+             (cljc-var "jsonly" :cljs 13 13)]
+      :uses []}]}))
+
+;; @spec MCP-OP-QUERY-100
+(deftest pull-join-from-a-cljc-version-reaches-every-version-of-the-target
+  (let [r (pull/pull cljc-join-idx [:var/qname {:var/calls [:var/qname :var/platform :var/source]}]
+                     [:var/qname "k.c/top"])]
+    (is (= [{:var/qname "k.c/both" :var/platform :clj :var/source "(defn both [x] (inc x))"}
+            {:var/qname "k.c/both" :var/platform :cljs :var/source "(defn both [x] (js/f x))"}]
+           (:var/calls r))
+        ":cljc source reaches both versions, :clj first, each with its own source")))
+
+;; @spec MCP-OP-QUERY-100
+(deftest pull-root-with-two-versions-returns-a-vector-and-joins-stay-on-the-platform
+  (let [r (pull/pull cljc-join-idx [:var/qname :var/platform {:var/calls [:var/qname :var/platform]}]
+                     [:var/qname "k.c/twice"])]
+    (is (vector? r))
+    (is (= [:clj :cljs] (mapv :var/platform r)))
+    (is (= [[{:var/qname "k.c/both" :var/platform :clj}]
+            [{:var/qname "k.c/both" :var/platform :cljs}
+             {:var/qname "k.c/jsonly" :var/platform :cljs}]]
+           (mapv :var/calls r))
+        "a :clj source reaches the :clj target only; a :cljs source the :cljs ones")))
+
+;; @spec MCP-OP-QUERY-100
+(deftest pull-ns-and-keyword-joins-follow-versions
+  (let [r (pull/pull cljc-join-idx [:ns/name {:ns/_in-ns [:var/qname :var/platform]}]
+                     [:ns/name "k.c"])]
+    (is (= [["k.c/both" :clj] ["k.c/both" :cljs] ["k.c/top" :cljc]
+            ["k.c/twice" :clj] ["k.c/twice" :cljs] ["k.c/jsonly" :cljs]]
+           (mapv (juxt :var/qname :var/platform) (:ns/_in-ns r)))
+        "every version, in file order")))
+
+;; @spec MCP-OP-QUERY-100
+(deftest pull-callers-join-reaches-the-applicable-versions
+  (let [r (pull/pull cljc-join-idx [:var/qname :var/platform {:var/_calls 2}]
+                     [:var/qname "k.c/both"])]
+    (is (= [:clj :cljs] (mapv :var/platform r)))
+    (is (= [["k.c/top" :cljc] ["k.c/twice" :clj]]
+           (mapv (juxt :var/qname :var/platform) (:var/_calls (first r)))))))
+
+;; ---------------------------------------------------------------------------
+;; Wiring of the pull bounds through `bindings` (MCP-OP-QUERY-107, 112, 129)
+;; ---------------------------------------------------------------------------
+
+;; @spec MCP-OP-QUERY-129
+;; @spec MCP-OP-QUERY-112
+(deftest bound-pull-takes-the-node-budget-from-the-options
+  (let [pull-fn (get (fns/bindings idx (atom #{}) {:max-pull-nodes 1}) 'pull)
+        data (thrown-data #(pull-fn [:var/qname {:var/calls [:var/qname]}]
+                                    [:var/qname "a.b/f"]))]
+    (is (= :result-too-large (:error-type data)))
+    (is (= :pull-nodes (:reason data)))
+    (is (string? (:remedy data))))
+  (testing "the same pull inside the budget returns data"
+    (let [pull-fn (get (fns/bindings idx (atom #{}) {:max-pull-nodes 10}) 'pull)]
+      (is (= 2 (count (:var/calls (pull-fn [:var/qname {:var/calls [:var/qname]}]
+                                           [:var/qname "a.b/f"]))))))))
+
+;; @spec MCP-OP-QUERY-129
+;; @spec MCP-OP-QUERY-107
+(deftest bound-pull-calls-the-interrupt-fn-and-lets-its-throw-stop-the-pull
+  (let [calls (atom 0)
+        pull-fn (get (fns/bindings idx (atom #{}) {:interrupt-fn #(swap! calls inc)}) 'pull)]
+    (pull-fn [:var/qname {:var/calls [:var/qname]}] [:var/qname "a.b/f"])
+    (is (pos? @calls) "the pull checks the hook for each entity"))
+  (let [stop (fn [] (throw (ex-info "stop" {:error-type :timeout})))
+        pull-fn (get (fns/bindings idx (atom #{}) {:interrupt-fn stop}) 'pull)]
+    (is (= :timeout (:error-type (thrown-data #(pull-fn [:var/qname {:var/calls [:var/qname]}]
+                                                        [:var/qname "a.b/f"])))))))
+
+;; @spec MCP-OP-QUERY-129
+(deftest bindings-without-options-keep-the-default-budget
+  (let [pull-fn (get (fns/bindings idx (atom #{})) 'pull)]
+    (is (= "a.b/f" (:var/qname (pull-fn [:var/qname] [:var/qname "a.b/f"]))))))
+
+;; --- 133 ---
+
+(defn- with-reads-kw
+  "idx where the var versions of each qname in `qnames` read the keyword name `kw`."
+  [kw qnames]
+  (reduce (fn [i q]
+            (update-in i [:vars q]
+                       (fn [v] (if (map? v)
+                                 (update v :reads-kw (fnil conj []) kw)
+                                 (mapv #(update % :reads-kw (fnil conj []) kw) v)))))
+          idx qnames))
+
+;; @spec MCP-OP-QUERY-133
+(deftest pull-reverse-reads-kw-join-returns-readers-sorted-by-qname
+  (let [i (with-reads-kw "scope" ["a.b/g" "a.b/f"])]
+    (is (= {:kw/name "scope" :var/_reads-kw [{:var/qname "a.b/f"} {:var/qname "a.b/g"}]}
+           (pull/pull i [:kw/name {:var/_reads-kw [:var/qname]}] [:kw/name "scope"])))
+    (testing "a keyword that nobody reads gives no join"
+      (is (= {:kw/name "nope"}
+             (pull/pull i [:kw/name {:var/_reads-kw [:var/qname]}] [:kw/name "nope"]))))))
+
+;; @spec MCP-OP-QUERY-133
+(deftest pull-reverse-uses-kw-join-returns-users-on-the-fixture-index
+  (is (= {:kw/name "x/k" :var/_uses-kw [{:var/qname "a.b/g"}]}
+         (pull/pull idx [:kw/name {:var/_uses-kw [:var/qname]}] [:kw/name "x/k"]))))
+
+;; ---------------------------------------------------------------------------
+;; search (issue #27)
+;; ---------------------------------------------------------------------------
+
+(defn- hit-names [result] (mapv :name result))
+
+;; @spec MCP-OP-QUERY-137
+;; @spec MCP-OP-QUERY-138
+(deftest search-ranks-vars-by-the-words-of-their-name-doc-and-source
+  (testing "words from the source"
+    (is (= "a.b/f" (first (hit-names (fns/search idx "swap state conj"))))))
+  (testing "a word inside a hyphenated token matches (ex-info gives ex and info)"
+    (is (= ["a.b/g"] (hit-names (fns/search idx "info")))))
+  (testing "the docstring counts"
+    (is (= ["a.b/f"] (hit-names (fns/search idx "Does")))))
+  (testing "matching is case-insensitive and has no stemming"
+    (is (= ["a.b/f"] (hit-names (fns/search idx "SWAP"))))
+    (is (= [] (hit-names (fns/search idx "swapping")))))
+  (testing "a name hit outranks a source-only hit (weight 2)"
+    (is (= "c.d.e/h" (first (hit-names (fns/search idx "h x")))))))
+
+;; @spec MCP-OP-QUERY-137
+(deftest search-splits-camel-case-and-keeps-the-whole-token
+  (let [file {:path "src/p/q.clj" :mtime 1 :size 1 :sha256 (apply str (repeat 64 "d"))
+              :ns "p.q" :uses []
+              :vars [{:qname "p.q/load-page" :ns "p.q" :name "load-page" :platform :clj
+                      :file "src/p/q.clj" :start 1 :end 2 :kind "clojure.core/defn" :private? false
+                      :arglists ["[m]"] :source "(defn load-page [m] (get m \"pyLoadActivityParameters\"))"
+                      :calls [] :fx [] :uses-kw [] :reads-kw [] :throws? false}]}
+        ix (code-index/apply-ingest code-index/empty-index {:upsert [file]})]
+    (is (= ["p.q/load-page"] (hit-names (fns/search ix "pyLoadActivityParameters"))) "whole token")
+    (is (= ["p.q/load-page"] (hit-names (fns/search ix "activity"))) "camel-case part")
+    (is (= ["p.q/load-page"] (hit-names (fns/search ix "page"))) "kebab-case part of the name")))
+
+;; @spec MCP-OP-QUERY-138
+(deftest search-returns-skeleton-var-maps-with-the-qualified-name
+  (let [result (fns/search idx "swap")
+        [hit] result
+        skeleton-f (first (filter #(= "a.b/f" (:qname %)) (fns/skeleton idx 'a.b)))]
+    (is (vector? result))
+    (is (= {:kind :search :query "swap"} (meta result)))
+    (is (= (assoc skeleton-f :name "a.b/f") hit))
+    (is (plain-data? result))))
+
+;; @spec MCP-OP-QUERY-138
+(deftest search-with-no-match-is-an-empty-vector
+  (is (= [] (fns/search idx "nothingmatchesthis"))))
+
+;; @spec MCP-OP-QUERY-136
+(deftest search-limit-caps-the-result
+  (is (= 3 (count (fns/search idx "x"))))
+  (is (= 1 (count (fns/search idx "x" {:limit 1}))))
+  (is (= 3 (count (fns/search idx "x" {:limit 50})))))
+
+;; @spec MCP-OP-QUERY-139
+(deftest search-leaves-out-test-files-unless-asked
+  (is (= [] (hit-names (fns/search idx "map"))) "only a.b-test/t has map")
+  (is (= ["a.b-test/t"] (hit-names (fns/search idx "map" {:include-tests true})))))
+
+;; @spec MCP-OP-QUERY-136
+(deftest search-refuses-bad-input-with-a-remedy
+  (doseq [args [[""] ["   "] [nil] ['swap] [(apply str (repeat 4001 "a"))]
+                ["x" {:limit 0}] ["x" {:limit 51}] ["x" {:limit "3"}]
+                ["x" {:include-tests "yes"}] ["x" {:limt 3}] ["x" 3]]]
+    (let [data (thrown-data #(apply fns/search idx args))]
+      (testing (pr-str args)
+        (is (= :invalid-expression (:error-type data)))
+        (is (string? (:remedy data)))))))
+
+;; @spec MCP-OP-QUERY-140
+(deftest search-reuses-the-search-index-of-an-identical-index-map
+  (is (identical? (fns/search-index idx) (fns/search-index idx)))
+  (let [other (code-index/apply-ingest code-index/empty-index {:upsert [fx/a-b-file]})]
+    (is (not (identical? (fns/search-index idx) (fns/search-index other))))))
+
+;; @spec MCP-OP-QUERY-136
+;; @spec MCP-OP-QUERY-139
+(deftest the-bound-search-records-the-files-of-its-hits
+  (let [touched (atom #{})
+        b (fns/bindings idx touched)]
+    (is (= ["a.b/f"] (hit-names ((get b 'search) "swap"))))
+    (is (= #{"src/a/b.clj"} @touched))))

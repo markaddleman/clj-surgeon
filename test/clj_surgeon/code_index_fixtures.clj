@@ -22,6 +22,7 @@
    [{:qname "a.b/f"
      :ns "a.b"
      :name "f"
+     :platform :clj
      :file "src/a/b.clj"
      :start 4
      :end 7
@@ -42,6 +43,7 @@
     {:qname "a.b/g"
      :ns "a.b"
      :name "g"
+     :platform :clj
      :file "src/a/b.clj"
      :start 9
      :end 12
@@ -73,6 +75,7 @@
    [{:qname "c.d.e/h"
      :ns "c.d.e"
      :name "h"
+     :platform :clj
      :file "src/c/d/e.clj"
      :start 3
      :end 3
@@ -98,6 +101,7 @@
    [{:qname "a.b-test/t"
      :ns "a.b-test"
      :name "t"
+     :platform :clj
      :file "test/a/b_test.clj"
      :start 4
      :end 4

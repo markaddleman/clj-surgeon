@@ -105,7 +105,7 @@
         g (var-of r "g")
         answer (var-of r "answer")]
     (is (= ["a.b/f" "a.b/g" "a.b/answer"] (mapv :qname (:vars r))))
-    (is (= {:qname "a.b/f" :ns "a.b" :name "f" :file "src/a/b.clj"
+    (is (= {:qname "a.b/f" :ns "a.b" :name "f" :platform :clj :file "src/a/b.clj"
             :start 3 :end 6
             :kind "clojure.core/defn" :private? false
             :arglists ["[x]" "[x y]"]
@@ -338,3 +338,85 @@
   (let [r (analyze "(ns a.b)\n\n(defn f [x] (inc x)\n")]
     (is (map? r))
     (is (= "src/a/b.clj" (:path r)))))
+
+;; ---------------------------------------------------------------------------
+;; Platform of a var (MCP-OP-QUERY-098, 099; decision C1, issue #3)
+;; ---------------------------------------------------------------------------
+
+(defn- analyze-at
+  "Run file-result on a literal source text at `path`."
+  [path text]
+  (ingest/file-result {:path path :text text :mtime 1792000000000
+                       :size (count text) :sha256 fake-sha}))
+
+(def ^:private cljc-text
+  (str "(ns a.b)\n"                                         ; 1
+       "\n"                                                 ; 2
+       "(defn same [x] (inc x))\n"                          ; 3
+       "\n"                                                 ; 4
+       "#?(:clj (defn diff [x] (str x))\n"                  ; 5
+       "   :cljs (defn diff [x y] (js/foo x y)))\n"         ; 6
+       "\n"                                                 ; 7
+       "#?(:clj (defn only-clj [] 1))\n"                    ; 8
+       "\n"                                                 ; 9
+       "#?(:cljs (defn only-cljs [] 2))\n"))                ; 10
+
+(defn- versions
+  [result name]
+  (filter #(= name (:name %)) (:vars result)))
+
+;; @spec MCP-OP-QUERY-098
+(deftest a-clj-file-gives-the-clj-platform-and-a-cljs-file-the-cljs-platform
+  (let [text "(ns a.b)\n\n(defn f [x] x)\n"]
+    (is (= [:clj] (mapv :platform (:vars (analyze-at "src/a/b.clj" text)))))
+    (is (= [:cljs] (mapv :platform (:vars (analyze-at "src/a/b.cljs" text)))))))
+
+;; @spec MCP-OP-QUERY-099
+(deftest a-cljc-var-with-equal-analysis-on-both-platforms-gives-one-cljc-record
+  (let [r (analyze-at "src/a/b.cljc" cljc-text)
+        [same :as vs] (versions r "same")]
+    (is (= 1 (count vs)))
+    (is (= :cljc (:platform same)))
+    (is (= [3 3] [(:start same) (:end same)]))
+    (is (= "(defn same [x] (inc x))" (:source same)))))
+
+;; @spec MCP-OP-QUERY-099
+(deftest a-cljc-var-with-different-analysis-gives-a-clj-and-a-cljs-record
+  (let [r (analyze-at "src/a/b.cljc" cljc-text)
+        [clj-v cljs-v :as vs] (versions r "diff")]
+    (is (= 2 (count vs)))
+    (is (= [:clj :cljs] (mapv :platform vs)) "the clj version comes first")
+    (is (= ["[x]"] (:arglists clj-v)))
+    (is (= ["[x y]"] (:arglists cljs-v)))
+    (testing "start, end and source are those of the defining form of the branch"
+      (is (= [5 5] [(:start clj-v) (:end clj-v)]))
+      (is (= [6 6] [(:start cljs-v) (:end cljs-v)]))
+      (is (str/includes? (:source clj-v) "(str x)"))
+      (is (str/includes? (:source cljs-v) "(js/foo x y)")))))
+
+;; @spec MCP-OP-QUERY-099
+(deftest a-cljc-var-that-one-platform-defines-gives-one-record-of-that-platform
+  (let [r (analyze-at "src/a/b.cljc" cljc-text)]
+    (is (= [:clj] (mapv :platform (versions r "only-clj"))))
+    (is (= [:cljs] (mapv :platform (versions r "only-cljs"))))))
+
+;; @spec MCP-OP-QUERY-099
+(deftest cljc-records-keep-source-order-with-clj-before-cljs
+  (let [r (analyze-at "src/a/b.cljc" cljc-text)]
+    (is (= [["same" :cljc] ["diff" :clj] ["diff" :cljs] ["only-clj" :clj] ["only-cljs" :cljs]]
+           (mapv (juxt :name :platform) (:vars r))))))
+
+;; @spec MCP-OP-QUERY-099
+(deftest a-cljc-var-that-differs-only-by-the-core-namespace-of-its-macro-is-one-record
+  ;; kondo reports clojure.core/defn on :clj and cljs.core/defn on :cljs for the
+  ;; same form; that is not a difference of the var.
+  (let [r (analyze-at "src/a/b.cljc" "(ns a.b)\n\n(defn f [x] x)\n")]
+    (is (= [:cljc] (mapv :platform (:vars r))))
+    (is (= "clojure.core/defn" (:kind (first (:vars r)))))))
+
+;; @spec MCP-OP-QUERY-099
+(deftest the-first-definition-of-a-qname-and-platform-wins-in-one-file
+  (let [r (analyze-at "src/a/b.clj" "(ns a.b)\n\n(defn f [x] 1)\n\n(defn f [x y] 2)\n")
+        [v :as vs] (:vars r)]
+    (is (= 1 (count vs)))
+    (is (= 3 (:start v)))))

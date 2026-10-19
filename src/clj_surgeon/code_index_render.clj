@@ -116,8 +116,13 @@
          tail)))
 
 (defn- entity-line
-  [entity]
+  "The line of `entity`. `parent` is the id of the entity whose join holds it,
+   or nil for the root."
+  [entity parent]
   (cond
+    (contains? entity :pull/cycle-to)
+    (str (pull-id entity) " cycle: returns to " (:pull/cycle-to entity)
+         " (closed by " parent ")")
     (contains? entity :var/qname) (var-entity-line entity)
     (contains? entity :ns/name)
     (str (:ns/name entity)
@@ -128,7 +133,10 @@
   [n]
   (apply str (repeat n \space)))
 
+;; @spec MCP-OP-QUERY-097
 (defn- id-only?
+  "True for a map that holds an id and nothing else. A cycle map holds two keys,
+   so it never counts as a plain id."
   [element]
   (and (map? element)
        (= 1 (count element))
@@ -137,26 +145,27 @@
 (declare entity-lines)
 
 (defn- join-lines
-  [level label elements]
+  [level label parent elements]
   (let [pad (indent-text (+ level 2))]
     (if (every? id-only? elements)
       [(str pad label ": " (str/join ", " (map pull-id elements)))]
       (into [(str pad label ":")]
-            (mapcat #(entity-lines (+ level 4) %))
+            (mapcat #(entity-lines (+ level 4) % parent))
             elements))))
 
 (defn- entity-lines
-  [level entity]
+  [level entity parent]
   (let [pad (indent-text level)
-        inner (indent-text (+ level 2))]
-    (-> [(str pad (entity-line entity))]
+        inner (indent-text (+ level 2))
+        id (pull-id entity)]
+    (-> [(str pad (entity-line entity parent))]
         (into (when-let [source (:var/source entity)]
                 (concat [(str inner "```clojure")]
                         (map #(str inner %) (str/split-lines source))
                         [(str inner "```")])))
         (into (mapcat (fn [[k label]]
                         (when-let [elements (seq (get entity k))]
-                          (join-lines level label elements))))
+                          (join-lines level label id elements))))
               join-order))))
 
 (defn- pull-result?
@@ -164,9 +173,10 @@
   (and (map? x) (= :pull (:kind (meta x)))))
 
 ;; @spec MCP-OP-QUERY-064
+;; @spec MCP-OP-QUERY-097
 (defn- pull-text
   [result]
-  (str/join "\n" (entity-lines 0 result)))
+  (str/join "\n" (entity-lines 0 result nil)))
 
 ;; ---------------------------------------------------------------------------
 ;; Dispatch
@@ -174,7 +184,7 @@
 (def ^:private line-kinds #{:var :form :use :ns})
 
 (defn- element-kind
-  "The shared kind of a non-empty sequential value, or nil."
+  "The shared kind of a non-empty vector of realized elements, or nil."
   [xs]
   (let [xs (seq xs)]
     (cond
@@ -186,17 +196,45 @@
                    (every? #(and (map? %) (= kind (:kind %))) xs))
           kind)))))
 
+(defn- check-interrupt!
+  "The default interrupt fn: throw the `timeout` refusal when the thread is
+   interrupted."
+  []
+  (when (.isInterrupted (Thread/currentThread))
+    (throw (ex-info "Rendering was interrupted" {:error-type :timeout}))))
+
+;; @spec MCP-OP-QUERY-118
+;; @spec MCP-OP-QUERY-107
+(defn- realize-prefix
+  "A vector of the first `limit + 1` elements of `coll`, or all of them when
+   there are fewer. It realizes no element past that and polls `check!` for
+   each element."
+  [coll limit check!]
+  (loop [s coll acc (transient [])]
+    (if (> (count acc) limit)
+      (persistent! acc)
+      (if-let [s (seq s)]
+        (do (check!)
+            (recur (rest s) (conj! acc (first s))))
+        (persistent! acc)))))
+
 (defn- classify
-  [value]
+  "The kind of `value` and the elements that the rendering walks. A sequence is
+   cut to its first `limit + 1` elements and its kind comes from them."
+  [value limit check!]
   (cond
-    (string? value) :string
-    (pull-result? value) :pull
-    (and (map? value) (contains? line-kinds (:kind value))) (:kind value)
-    (and (sequential? value) (= :skeleton (:kind (meta value)))
-         (or (empty? value) (= :var (element-kind value)))) :skeleton
-    (and (sequential? value) (some? (element-kind value)))
-    [:many (element-kind value)]
-    :else :pr))
+    (string? value) [:string value]
+    (pull-result? value) [:pull value]
+    (and (map? value) (contains? line-kinds (:kind value))) [(:kind value) value]
+    (sequential? value)
+    (let [xs (realize-prefix value limit check!)
+          kind (element-kind xs)]
+      (cond
+        (and (= :skeleton (:kind (meta value)))
+             (or (empty? xs) (= :var kind))) [:skeleton xs]
+        (some? kind) [[:many kind] xs]
+        :else [:pr value]))
+    :else [:pr value]))
 
 (defn- single-text
   [kind value]
@@ -206,6 +244,37 @@
     :use (use-line value)
     :ns (namespace-line value)
     :pull (pull-text value)))
+
+(defn- write-lines!
+  "Write the `texts` of the sequence `xs` to `w` joined by `sep`, and polling
+   `check!` for each one."
+  [^Writer w sep texts check!]
+  (loop [s (seq texts) first? true]
+    (when s
+      (check!)
+      (when-not first? (.write w ^String sep))
+      (.write w ^String (first s))
+      (recur (next s) false))))
+
+(defn- write-rendering!
+  "Write the text of `value` to `w` as `render` gives it, but stop once the
+   writer refuses. `limit` bounds the elements of a sequence."
+  [^Writer w value limit check!]
+  (let [[kind items] (classify value limit check!)]
+    (cond
+      (= :pr kind) (binding [*out* w] (pr items))
+      (= :string kind) (.write w ^String items)
+      (= :skeleton kind)
+      (write-lines! w "\n" (cons (ns-line (meta value)) (map var-line items)) check!)
+      (vector? kind)
+      (let [k (second kind)
+            lines (map #(single-text k %) items)]
+        (case k
+          :form (write-lines! w "\n\n" lines check!)
+          :use (do (write-lines! w "\n" lines check!)
+                   (.write w (str "\ntotal " (count items))))
+          (write-lines! w "\n" lines check!)))
+      :else (.write w ^String (single-text kind items)))))
 
 ;; @spec MCP-OP-QUERY-056
 ;; @spec MCP-OP-QUERY-057
@@ -220,20 +289,9 @@
    form, use, namespace and pull values get their compact layouts. Anything
    else goes through `pr-str`."
   [value]
-  (let [kind (classify value)]
-    (cond
-      (= :pr kind) (pr-str value)
-      (= :string kind) value
-      (= :skeleton kind)
-      (str/join "\n" (cons (ns-line (meta value)) (map var-line value)))
-      (vector? kind)
-      (let [k (second kind)
-            lines (map #(single-text k %) value)]
-        (case k
-          :form (str/join "\n\n" lines)
-          :use (str (str/join "\n" lines) "\ntotal " (count value))
-          (str/join "\n" lines)))
-      :else (single-text kind value))))
+  (let [w (java.io.StringWriter.)]
+    (write-rendering! w value Long/MAX_VALUE (fn []))
+    (str w)))
 
 ;; ---------------------------------------------------------------------------
 ;; render-def
@@ -271,17 +329,19 @@
 
 (defn- limited-writer
   "A Writer that keeps at most `limit` characters and throws a marked
-   ex-info once one more character arrives."
-  ^Writer [^StringBuilder sb limit]
+   ex-info once one more character arrives. It calls `check!` at each write."
+  ^Writer [^StringBuilder sb limit check!]
   (proxy [Writer] []
     (write
       ([x]
+       (check!)
        (if (string? x)
          (.append sb ^String x)
          (.append sb (char x)))
        (when (> (.length sb) limit)
          (throw (ex-info "limit" {::limit true}))))
       ([x off len]
+       (check!)
        (if (string? x)
          (.append sb ^String x (int off) (int (+ off len)))
          (.append sb ^chars x (int off) (int len)))
@@ -304,19 +364,23 @@
     {:text text :over-limit? (boolean over?) :chars (count text)}))
 
 ;; @spec MCP-OP-QUERY-085
+;; @spec MCP-OP-QUERY-107
+;; @spec MCP-OP-QUERY-118
 (defn render-bounded
-  "Render `value` like `render`, stopping at `limit` characters. A value that
-   goes through `pr-str` streams into a writer that stops at the limit, so an
-   endless lazy seq ends at once. Returns `:text`, `:over-limit?` and `:chars`."
-  [value limit]
-  (if (= :pr (classify value))
-    (let [sb (StringBuilder.)
-          w (limited-writer sb limit)
-          hit? (try
-                 (binding [*out* w] (pr value))
-                 false
-                 (catch Throwable t
-                   (if (limit-hit? t) true (throw t))))]
-      (bounded-result (str sb) limit hit?))
-    (let [text (render value)]
-      (bounded-result text limit (> (count text) limit)))))
+  "Render `value` like `render`, stopping at `limit` characters. Every kind of
+   value streams into a writer that stops at the limit. A sequence is realized
+   up to `limit + 1` elements, and its kind comes from those elements, so an
+   endless lazy seq ends at once. `interrupt-fn` is a zero-argument function
+   that the renderer calls for each element. It throws to stop the rendering.
+   The default throws the `timeout` refusal when the thread is interrupted.
+   Returns `:text`, `:over-limit?` and `:chars`."
+  ([value limit] (render-bounded value limit check-interrupt!))
+  ([value limit interrupt-fn]
+   (let [sb (StringBuilder.)
+         w (limited-writer sb limit interrupt-fn)
+         hit? (try
+                (write-rendering! w value limit interrupt-fn)
+                false
+                (catch Throwable t
+                  (if (limit-hit? t) true (throw t))))]
+     (bounded-result (str sb) limit hit?))))

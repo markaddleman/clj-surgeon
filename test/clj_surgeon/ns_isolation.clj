@@ -159,7 +159,13 @@
      ;; shape of this entry: it allows the VALUE inside the atom to move; a
      ;; `with-redefs` that swapped the var's root would still be refused by
      ;; `root-identity-violations`, which never reads this map.
-     clj-surgeon.spawn-ledger/ledger})
+     clj-surgeon.spawn-ledger/ledger
+
+     ;; the search index cache (MCP-OP-QUERY-140): at most four Lucene indexes,
+     ;; keyed by the identical index map. A namespace that calls `search`
+     ;; populates it; its entries are derived from the index map and are never
+     ;; read as an assertion.
+     clj-surgeon.code-index-search/cache})
 
 (def cold-runtime-command
   "@spec TEST-ISO-002 -- commands that are NEVER allowlistable in the fast or
