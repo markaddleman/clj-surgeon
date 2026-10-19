@@ -34,6 +34,7 @@
    [clj-surgeon.mcp-workspace-sources :as workspace-sources]
    [clj-surgeon.mcp-write-refusal :as write-refusal]
    [clj-surgeon.receipt-artifacts :as artifacts]
+   [clj-surgeon.spike-edit-test :as spike-edit-test]
    [clj-surgeon.structural-lens :as structural-lens]
    [clojure.java.io :as io]
    [clojure.string :as str])
@@ -2554,7 +2555,7 @@
   "Return the exact public tool catalog for one startup profile."
   [profile]
   (case (or profile :full)
-    :full [inspect-tool/inspect-tool
+    :full (into [inspect-tool/inspect-tool
            clj-change-tool
            edit-clojure-tool
            program-tool/transform-clojure-tool
@@ -2571,6 +2572,8 @@
                   (fn [exchange params callback]
                     (require-change/handle (select-keys @runtime-config [:verification-profiles :receipt-dir])
                                            exchange params callback)))]
+                ;; SPIKE (issue #27, stage C): only when CLJ_SURGEON_EDIT_TEST is "1"
+                (spike-edit-test/tools))
     :edit [edit-clojure-tool]
     (throw (ex-info "Unsupported MCP tool profile"
                     {:profile profile
