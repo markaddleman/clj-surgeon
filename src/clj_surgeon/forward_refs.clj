@@ -5,10 +5,15 @@
    [clj-surgeon.mcp-process :as process-env]
    [clojure.string :as str]))
 
-(def ^:private kondo-finished-exits
+(def kondo-finished-exits
   "clj-kondo exits 0 clean, 2 with warnings, 3 with errors. In all three the
   JSON analysis on stdout is complete. Any other exit is a real failure."
   #{0 2 3})
+
+(def kondo-output-limit
+  "Bytes of clj-kondo stdout kept. A 3837-line namespace makes 3 MB of
+  analysis JSON, so 1 MiB cut real files."
+  (* 64 1024 1024))
 
 (defn- run-kondo [file]
   (let [command ["clj-kondo" "--lint" file
@@ -19,7 +24,7 @@
                    {:command command
                     :cwd (System/getProperty "user.dir")
                     :timeout-ms 120000
-                    :visible-byte-limit (* 1024 1024)})
+                    :visible-byte-limit kondo-output-limit})
                  (catch Exception error
                    (throw (ex-info
                             "Forward-reference analyzer authority is unavailable"
@@ -35,6 +40,10 @@
                       {:error-type :forward-reference-analysis-failed
                        :exit (:exit result)
                        :diagnostic (str/trim (or (:err result) ""))})))
+    (when (:out-truncated result)
+      (throw (ex-info "Forward-reference analysis output exceeds the output limit"
+                      {:error-type :forward-reference-analysis-truncated
+                       :limit kondo-output-limit})))
     (let [parsed (try
                    (json/parse-string (:out result) true)
                    (catch Exception error
