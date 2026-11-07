@@ -4,6 +4,7 @@
   This namespace does not write source. It returns exact, lossless replacement
   targets for the transaction kernel."
   (:require
+   [clj-surgeon.forward-refs :as fwd]
    [clj-surgeon.mcp-process :as process-env]
    [clojure.edn :as edn]
    [clojure.java.io :as io]
@@ -36,14 +37,14 @@
                  "--filename" file
                  "--lang" (source-language file)
                  "--config" config]
-        {:keys [finished? exit out err admission]}
+        {:keys [finished? exit out err admission out-truncated]}
         (try
           (process-env/run-bounded!
             {:command command
              :cwd working-directory
              :timeout-ms 120000
              :stdin-text source
-             :visible-byte-limit (* 1024 1024)})
+             :visible-byte-limit fwd/kondo-output-limit})
           (catch Exception error
             (throw (ex-info
                      "clj-kondo binding-analysis authority is unavailable"
@@ -61,10 +62,14 @@
       (refuse! :analyzer-authority-unverified
                "clj-kondo binding-analysis authority is unverified"
                {:file file :admission admission}))
-    (when-not (and finished? (zero? exit))
+    (when-not (and finished? (contains? fwd/kondo-finished-exits exit))
       (refuse! :binding-analysis-failed
                "clj-kondo binding analysis did not complete successfully"
                {:file file :exit exit :diagnostic (str/trim (or err ""))}))
+    (when out-truncated
+      (refuse! :binding-analysis-truncated
+               "clj-kondo binding analysis output exceeds the output limit"
+               {:file file :limit fwd/kondo-output-limit}))
     (when-not (map? analysis)
       (refuse! :binding-analysis-failed
                "clj-kondo did not return local binding analysis"
