@@ -5,6 +5,11 @@
    [clj-surgeon.mcp-process :as process-env]
    [clojure.string :as str]))
 
+(def ^:private kondo-finished-exits
+  "clj-kondo exits 0 clean, 2 with warnings, 3 with errors. In all three the
+  JSON analysis on stdout is complete. Any other exit is a real failure."
+  #{0 2 3})
+
 (defn- run-kondo [file]
   (let [command ["clj-kondo" "--lint" file
                  "--config"
@@ -25,17 +30,21 @@
       (throw (ex-info "Forward-reference analyzer authority is unverified"
                       {:error-type :analyzer-authority-unverified
                        :admission (:admission result)})))
-    (when-not (and (:finished? result) (zero? (:exit result)))
+    (when-not (and (:finished? result) (contains? kondo-finished-exits (:exit result)))
       (throw (ex-info "Forward-reference analysis failed"
                       {:error-type :forward-reference-analysis-failed
                        :exit (:exit result)
                        :diagnostic (str/trim (or (:err result) ""))})))
-    (try
-      (json/parse-string (:out result) true)
-      (catch Exception error
-        (throw (ex-info "Forward-reference analyzer returned invalid JSON"
-                        {:error-type :forward-reference-analysis-invalid}
-                        error))))))
+    (let [parsed (try
+                   (json/parse-string (:out result) true)
+                   (catch Exception error
+                     (throw (ex-info "Forward-reference analyzer returned invalid JSON"
+                                     {:error-type :forward-reference-analysis-invalid}
+                                     error))))]
+      (when-not (map? parsed)
+        (throw (ex-info "Forward-reference analyzer returned no analysis object"
+                        {:error-type :forward-reference-analysis-invalid})))
+      parsed)))
 
 (defn detect-forward-refs
   "Returns forward references: vars used before they're defined in the same namespace."
