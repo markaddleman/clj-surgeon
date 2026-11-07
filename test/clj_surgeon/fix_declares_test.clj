@@ -1,8 +1,10 @@
 (ns clj-surgeon.fix-declares-test
   {:lane :fast}
   (:require
+   [clj-surgeon.core :as core]
    [clj-surgeon.fix-declares :as fix]
    [clj-surgeon.forward-refs :as fwd]
+   [clj-surgeon.mcp-process :as process-env]
    [clojure.java.io :as io]
    [clojure.string :as str]
    [clojure.test :refer [deftest is testing]]))
@@ -326,3 +328,49 @@
           (is (str/includes? new-source "(defn helper"))
           (is (< (str/index-of new-source "(defn helper")
                  (str/index-of new-source "(defn main"))))))))
+
+;; clj-kondo exits 2 on warnings and 3 on errors; stdout is the complete
+;; analysis either way. The process is stubbed so the exit-code contract is
+;; testable without the analyzer admission machinery.
+
+(def ^:private forward-ref-analysis
+  "{\"analysis\":{\"var-definitions\":[{\"ns\":\"a.b\",\"name\":\"g\",\"row\":4}],\"var-usages\":[{\"from\":\"a.b\",\"to\":\"a.b\",\"name\":\"g\",\"row\":2}]}}")
+
+(defn- kondo-result [exit & {:keys [out finished?] :or {out forward-ref-analysis finished? true}}]
+  {:admission {:status :admitted} :finished? finished? :exit exit :out out :err ""})
+
+(defn- detect-with [result]
+  (with-redefs [process-env/run-bounded! (fn [_] result)]
+    (fwd/detect-forward-refs "a.clj" 'a.b)))
+
+(def ^:private expected-forward-refs
+  [{:name 'g :used-at 2 :defined-at 4 :gap 2}])
+
+(deftest forward-refs-survive-kondo-findings-exit-codes
+  (testing "exit 0 (clean), 2 (warnings) and 3 (errors) are a finished analysis"
+    (doseq [exit [0 2 3]]
+      (is (= expected-forward-refs (detect-with (kondo-result exit)))
+          (str "kondo exit " exit)))))
+
+(deftest forward-refs-still-refuse-a-failed-analysis
+  (testing "other exits, unfinished runs and bad JSON still throw"
+    (doseq [[label result expected]
+            [["exit 1" (kondo-result 1) :forward-reference-analysis-failed]
+             ["exit 64" (kondo-result 64) :forward-reference-analysis-failed]
+             ["unfinished" (kondo-result 3 :finished? false) :forward-reference-analysis-failed]
+             ["exit 3 bad JSON" (kondo-result 3 :out "not json") :forward-reference-analysis-invalid]
+             ["exit 2 empty out" (kondo-result 2 :out "") :forward-reference-analysis-invalid]]]
+      (is (= expected
+             (try (detect-with result) nil
+                  (catch clojure.lang.ExceptionInfo e (:error-type (ex-data e)))))
+          label))))
+
+(deftest ls-returns-outline-when-kondo-reports-findings
+  (doseq [exit [2 3]]
+    (with-temp-file "(ns a.b)\n(defn f [] (g))\n\n(defn g [] 1)\n"
+      (fn [path]
+        (with-redefs [process-env/run-bounded! (fn [_] (kondo-result exit))]
+          (let [result (core/run-outline {:file path})]
+            (is (= 'a.b (:ns result)) (str "kondo exit " exit))
+            (is (= expected-forward-refs (:forward-refs result))
+                (str "kondo exit " exit))))))))
